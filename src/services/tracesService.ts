@@ -10,16 +10,13 @@ import type {
 } from '@/types/bbva';
 import { dateRangeToNano } from './dateUtils';
 import { buildRhoSpansUrl } from './urlBuilder';
-import { apiRequest } from './httpClient';
+import { apiRequest, buildAuthHeaders } from './httpClient';
 
 // ---- Normalize duration to ms ----
 function normalizeDuration(span: RawSpan): number {
   if (span.duration != null) {
-    // If > 1e12, assume nanoseconds
     if (span.duration > 1e12) return span.duration / 1e6;
-    // If > 1e9, assume microseconds
     if (span.duration > 1e9) return span.duration / 1e3;
-    // Otherwise assume ms
     return span.duration;
   }
 
@@ -80,7 +77,6 @@ export function normalizeSpans(raw: RawSpan[] | SpansPaginatedResponse): Normali
     allRaw = [];
   }
 
-  // Deduplicate by spanId
   const seen = new Set<string>();
   const normalized: NormalizedSpan[] = [];
 
@@ -131,12 +127,13 @@ export async function fetchSpans(
 ): Promise<NormalizedSpan[]> {
   const { from, to } = dateRangeToNano(filters.fromDate, filters.toDate);
   const site = filters.site ?? 'LIVE-04';
+  const headers = buildAuthHeaders(filters.bearerToken);
 
   let url: string | null = buildRhoSpansUrl({ invokerTx, site, fromTimestamp: from, toTimestamp: to });
   const allRaw: RawSpan[] = [];
 
   while (url) {
-    const res = await apiRequest<SpansPaginatedResponse>(url);
+    const res = await apiRequest<SpansPaginatedResponse>(url, { headers });
 
     if (res.data) {
       allRaw.push(...res.data);

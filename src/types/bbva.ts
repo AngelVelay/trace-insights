@@ -14,6 +14,7 @@ export interface MetricsFilters {
   utilityType?: string;
   invokerLibrary?: string;
   limit?: number;
+  bearerToken?: string;
 }
 
 export type AggregateField =
