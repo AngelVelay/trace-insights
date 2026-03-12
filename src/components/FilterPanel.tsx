@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { CalendarIcon, Search } from 'lucide-react';
+import { CalendarIcon, Search, KeyRound, Eye, EyeOff } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -15,6 +15,7 @@ import { Calendar } from '@/components/ui/calendar';
 import { cn } from '@/lib/utils';
 import { format } from 'date-fns';
 import { UTILITY_TYPES, type MetricsFilters } from '@/types/bbva';
+import { toast } from 'sonner';
 
 interface FilterPanelProps {
   onSearch: (filters: MetricsFilters) => void;
@@ -30,15 +31,23 @@ export default function FilterPanel({ onSearch, loading }: FilterPanelProps) {
   const [invokerTx, setInvokerTx] = useState('');
   const [utilityType, setUtilityType] = useState('');
   const [limit, setLimit] = useState('10');
+  const [bearerToken, setBearerToken] = useState('');
+  const [showToken, setShowToken] = useState(false);
 
   const handleSearch = () => {
+    if (!bearerToken.trim()) {
+      toast.error('Bearer Token es requerido para consultar los endpoints.');
+      return;
+    }
+
     onSearch({
       fromDate,
       toDate,
       site: site || undefined,
       invokerTx: invokerTx || undefined,
-      utilityType: utilityType || undefined,
+      utilityType: utilityType === 'all' ? undefined : utilityType || undefined,
       limit: limit ? Number(limit) : undefined,
+      bearerToken: bearerToken.trim(),
     });
   };
 
@@ -47,6 +56,39 @@ export default function FilterPanel({ onSearch, loading }: FilterPanelProps) {
       <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
         Filtros de consulta
       </h2>
+
+      {/* Bearer Token row */}
+      <div className="space-y-1.5">
+        <Label className="text-xs text-muted-foreground flex items-center gap-1.5">
+          <KeyRound className="h-3 w-3" />
+          Bearer Token
+        </Label>
+        <div className="flex gap-2">
+          <div className="relative flex-1">
+            <Input
+              type={showToken ? 'text' : 'password'}
+              placeholder="Pega tu Bearer Token aquí..."
+              className="font-mono text-xs pr-10"
+              value={bearerToken}
+              onChange={(e) => setBearerToken(e.target.value)}
+              autoComplete="off"
+            />
+            <button
+              type="button"
+              onClick={() => setShowToken(!showToken)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+            >
+              {showToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          </div>
+          {bearerToken && (
+            <span className="flex items-center text-xs text-accent font-medium">✓ Configurado</span>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground">
+          El token se usa solo en memoria y no se almacena de forma persistente.
+        </p>
+      </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
         {/* From date */}
@@ -152,7 +194,7 @@ export default function FilterPanel({ onSearch, loading }: FilterPanelProps) {
         </div>
       </div>
 
-      <Button onClick={handleSearch} disabled={loading} className="glow-primary">
+      <Button onClick={handleSearch} disabled={loading || !bearerToken.trim()} className="glow-primary">
         <Search className="mr-2 h-4 w-4" />
         {loading ? 'Consultando...' : 'Ejecutar consulta'}
       </Button>
