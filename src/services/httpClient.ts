@@ -1,0 +1,78 @@
+// ============================================================
+// HTTP client with retries, timeouts, error handling
+// ============================================================
+
+interface FetchOptions extends RequestInit {
+  timeout?: number;
+  maxRetries?: number;
+  retryDelay?: number;
+}
+
+async function fetchWithTimeout(url: string, options: FetchOptions = {}): Promise<Response> {
+  const { timeout = 30000, ...fetchOpts } = options;
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const response = await fetch(url, { ...fetchOpts, signal: controller.signal });
+    return response;
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+export async function apiRequest<T>(url: string, options: FetchOptions = {}): Promise<T> {
+  const { maxRetries = 3, retryDelay = 1000, ...rest } = options;
+
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetchWithTimeout(url, rest);
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      return (await response.json()) as T;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+
+      if (attempt < maxRetries) {
+        const delay = retryDelay * Math.pow(2, attempt);
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+  }
+
+  throw lastError ?? new Error('Unknown error');
+}
+
+// Concurrency limiter
+export function createConcurrencyLimiter(maxConcurrent: number) {
+  let running = 0;
+  const queue: (() => void)[] = [];
+
+  function next() {
+    if (queue.length > 0 && running < maxConcurrent) {
+      running++;
+      const resolve = queue.shift()!;
+      resolve();
+    }
+  }
+
+  return async function <T>(fn: () => Promise<T>): Promise<T> {
+    if (running >= maxConcurrent) {
+      await new Promise<void>((resolve) => queue.push(resolve));
+    } else {
+      running++;
+    }
+
+    try {
+      return await fn();
+    } finally {
+      running--;
+      next();
+    }
+  };
+}
