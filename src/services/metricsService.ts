@@ -16,7 +16,7 @@ import {
   buildInvokerTxFilter,
   buildUtilityTypeFilter,
 } from './urlBuilder';
-import { apiRequest, createConcurrencyLimiter } from './httpClient';
+import { apiRequest, buildAuthHeaders, createConcurrencyLimiter } from './httpClient';
 
 const limiter = createConcurrencyLimiter(5);
 
@@ -50,7 +50,8 @@ async function fetchAggregation(
     operations,
   });
 
-  const res = await limiter(() => apiRequest<AggregationResponse>(url));
+  const headers = buildAuthHeaders(filters.bearerToken);
+  const res = await limiter(() => apiRequest<AggregationResponse>(url, { headers }));
   return extractBuckets(res);
 }
 
@@ -74,7 +75,8 @@ export async function fetchFunctionalDashboard(filters: MetricsFilters): Promise
     ],
   });
 
-  const res = await limiter(() => apiRequest<AggregationResponse>(url));
+  const headers = buildAuthHeaders(filters.bearerToken);
+  const res = await limiter(() => apiRequest<AggregationResponse>(url, { headers }));
   return extractBuckets(res);
 }
 

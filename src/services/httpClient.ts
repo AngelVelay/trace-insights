@@ -48,6 +48,18 @@ export async function apiRequest<T>(url: string, options: FetchOptions = {}): Pr
   throw lastError ?? new Error('Unknown error');
 }
 
+// Build auth headers
+export function buildAuthHeaders(bearerToken?: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Accept': 'application/json, text/plain, */*',
+    'Content-Type': 'application/json',
+  };
+  if (bearerToken) {
+    headers['Authorization'] = `Bearer ${bearerToken}`;
+  }
+  return headers;
+}
+
 // Concurrency limiter
 export function createConcurrencyLimiter(maxConcurrent: number) {
   let running = 0;
