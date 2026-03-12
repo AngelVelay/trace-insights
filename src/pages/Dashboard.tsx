@@ -13,6 +13,7 @@ import KPIDashboard from '@/components/KPIDashboard';
 import MetricsTable from '@/components/MetricsTable';
 import TracesView from '@/components/TracesView';
 import ExportButtons from '@/components/ExportButtons';
+import MetricsCharts from '@/components/MetricsCharts';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { toast } from 'sonner';
 
