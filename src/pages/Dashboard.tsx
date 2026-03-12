@@ -13,6 +13,7 @@ import KPIDashboard from '@/components/KPIDashboard';
 import MetricsTable from '@/components/MetricsTable';
 import TracesView from '@/components/TracesView';
 import ExportButtons from '@/components/ExportButtons';
+import MetricsCharts from '@/components/MetricsCharts';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { toast } from 'sonner';
 
@@ -108,8 +109,11 @@ export default function Dashboard() {
 
         <KPIDashboard kpis={kpis} />
 
-        <Tabs defaultValue="metrics" className="space-y-4">
+        <Tabs defaultValue="charts" className="space-y-4">
           <TabsList className="bg-card border border-border">
+            <TabsTrigger value="charts" className="text-xs">
+              Gráficas
+            </TabsTrigger>
             <TabsTrigger value="metrics" className="text-xs">
               Métricas ({rows.length})
             </TabsTrigger>
@@ -117,6 +121,10 @@ export default function Dashboard() {
               Trazas ({spans.length})
             </TabsTrigger>
           </TabsList>
+
+          <TabsContent value="charts">
+            <MetricsCharts rows={rows} />
+          </TabsContent>
 
           <TabsContent value="metrics">
             <MetricsTable rows={rows} />
