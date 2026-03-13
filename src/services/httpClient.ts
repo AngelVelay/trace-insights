@@ -1,84 +1,73 @@
 // ============================================================
-// HTTP client with retries, timeouts, error handling
+// HTTP Client
 // ============================================================
 
-interface FetchOptions extends RequestInit {
-  timeout?: number;
-  maxRetries?: number;
-  retryDelay?: number;
-}
-
-async function fetchWithTimeout(url: string, options: FetchOptions = {}): Promise<Response> {
-  const { timeout = 30000, ...fetchOpts } = options;
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeout);
-
-  try {
-    const response = await fetch(url, { ...fetchOpts, signal: controller.signal });
-    return response;
-  } finally {
-    clearTimeout(id);
-  }
-}
-
-
-
-export async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
-
-  const text = await response.text();
-
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${text}`);
-  }
-
-  try {
-    return JSON.parse(text) as T;
-  } catch (error) {
-    console.error("Respuesta no JSON:", text);
-    throw new Error("La respuesta no es JSON válido");
-  }
-}
-
-// Build auth headers
-export function buildAuthHeaders(bearerToken?: string): Record<string, string> {
+export function buildAuthHeaders(token?: string): HeadersInit {
   const headers: Record<string, string> = {
-    'Accept': 'application/json, text/plain, */*',
-    'Content-Type': 'application/json',
+    Accept: "application/json",
   };
-  if (bearerToken) {
-    headers['Authorization'] = `Bearer ${bearerToken}`;
+
+  if (token?.trim()) {
+    headers.Authorization = `Bearer ${token.trim()}`;
   }
+
   return headers;
 }
 
-// Concurrency limiter
-export function createConcurrencyLimiter(maxConcurrent: number) {
-  let running = 0;
-  const queue: (() => void)[] = [];
+export async function apiRequest<T>(
+  url: string,
+  init?: RequestInit
+): Promise<T> {
+  const response = await fetch(url, {
+    ...init,
+    headers: {
+      Accept: "application/json",
+      ...(init?.headers ?? {}),
+    },
+  });
 
-  function next() {
-    if (queue.length > 0 && running < maxConcurrent) {
-      running++;
-      const resolve = queue.shift()!;
-      resolve();
-    }
+  const rawText = await response.text();
+
+  if (!response.ok) {
+    throw new Error(
+      `HTTP ${response.status} ${response.statusText} - ${rawText.slice(0, 300)}`
+    );
   }
 
-  return async function <T>(fn: () => Promise<T>): Promise<T> {
-    if (running >= maxConcurrent) {
+  if (!rawText || rawText.trim().length === 0) {
+    return {} as T;
+  }
+
+  try {
+    return JSON.parse(rawText) as T;
+  } catch (error) {
+    throw new Error(
+      `JSON.parse falló. Respuesta no JSON recibida: ${rawText.slice(0, 300)}`
+    );
+  }
+}
+
+export function createConcurrencyLimiter(maxConcurrent = 5) {
+  let active = 0;
+  const queue: Array<() => void> = [];
+
+  const next = () => {
+    active--;
+    const job = queue.shift();
+    if (job) job();
+  };
+
+  return async function limit<T>(fn: () => Promise<T>): Promise<T> {
+    if (active >= maxConcurrent) {
       await new Promise<void>((resolve) => queue.push(resolve));
-    } else {
-      running++;
     }
+
+    active++;
 
     try {
       return await fn();
     } finally {
-      running--;
       next();
     }
   };
-
-  
 }

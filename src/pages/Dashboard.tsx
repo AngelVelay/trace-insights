@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useCallback, useState } from "react";
 import type {
   MetricsFilters,
   MetricRow,
@@ -17,34 +17,11 @@ import MetricsCharts from "@/components/MetricsCharts";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
 
-function dedupeSpans(spans: NormalizedSpan[]): NormalizedSpan[] {
-  const seen = new Set<string>();
-  const result: NormalizedSpan[] = [];
-
-  for (const span of spans) {
-    const key = span.spanId || `${span.traceId}-${span.name}-${span.durationMs}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    result.push(span);
-  }
-
-  return result;
-}
-
 function computeKPIs(rows: MetricRow[], spans: NormalizedSpan[]): KPISummary {
-  const invokerTxs = new Set(
-    rows.map((r) => r.invokerTx).filter(Boolean)
-  );
-
-  const utypes = new Set(
-    rows.map((r) => r.utilitytype).filter(Boolean)
-  );
-
-  const params = new Set(
-    rows.map((r) => r.invokedparam).filter(Boolean)
-  );
-
-  const totalDur = spans.reduce((s, sp) => s + (sp.durationMs || 0), 0);
+  const invokerTxs = new Set(rows.map((r) => r.invokerTx));
+  const utypes = new Set(rows.map((r) => r.utilitytype));
+  const params = new Set(rows.map((r) => r.invokedparam));
+  const totalDur = spans.reduce((s, sp) => s + sp.durationMs, 0);
 
   return {
     totalInvokerTx: invokerTxs.size,
@@ -56,62 +33,14 @@ function computeKPIs(rows: MetricRow[], spans: NormalizedSpan[]): KPISummary {
   };
 }
 
-async function fetchSpansForManyInvokerTx(
-  filters: MetricsFilters,
-  invokerTxList: string[],
-  setProgress: (value: string) => void
-): Promise<NormalizedSpan[]> {
-  const uniqueInvokerTx = Array.from(
-    new Set(invokerTxList.map((v) => String(v || "").trim()).filter(Boolean))
-  );
-
-  if (!uniqueInvokerTx.length) return [];
-
-  const allSpans: NormalizedSpan[] = [];
-  const total = uniqueInvokerTx.length;
-
-  // Baja concurrencia para no romper RHO
-  const CONCURRENCY = 3;
-
-  for (let i = 0; i < uniqueInvokerTx.length; i += CONCURRENCY) {
-    const chunk = uniqueInvokerTx.slice(i, i + CONCURRENCY);
-
-    setProgress(
-      `Obteniendo trazas RHO ${Math.min(i + 1, total)}-${Math.min(
-        i + chunk.length,
-        total
-      )} de ${total}...`
-    );
-
-    const chunkResults = await Promise.allSettled(
-      chunk.map(async (invokerTx) => {
-        try {
-          const spans = await fetchSpans(filters, invokerTx);
-          return spans;
-        } catch (error) {
-          console.error(`Error obteniendo trazas para ${invokerTx}:`, error);
-          return [];
-        }
-      })
-    );
-
-    for (const result of chunkResults) {
-      if (result.status === "fulfilled" && Array.isArray(result.value)) {
-        allSpans.push(...result.value);
-      }
-    }
-  }
-
-  return dedupeSpans(allSpans);
-}
-
 export default function Dashboard() {
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState("");
-  const [metricsError, setMetricsError] = useState<string | null>(null);
   const [rows, setRows] = useState<MetricRow[]>([]);
   const [spans, setSpans] = useState<NormalizedSpan[]>([]);
   const [classified, setClassified] = useState<ClassifiedTraces | null>(null);
+  const [metricsError, setMetricsError] = useState<string | null>(null);
+
   const [kpis, setKpis] = useState<KPISummary>({
     totalInvokerTx: 0,
     totalUtilityTypes: 0,
@@ -128,64 +57,31 @@ export default function Dashboard() {
     setRows([]);
     setSpans([]);
     setClassified(null);
-    setKpis({
-      totalInvokerTx: 0,
-      totalUtilityTypes: 0,
-      totalInvokedParams: 0,
-      totalJumps: 0,
-      totalDurationMs: 0,
-      avgDurationMs: 0,
-    });
 
     try {
-      // 1) Fetch métricas completas
-      setProgress("Obteniendo métricas MU...");
       const metricRows = await fetchFullMetrics(filters, setProgress);
+      console.debug("[Dashboard] metricRows =", metricRows);
       setRows(metricRows);
 
-      // 2) Resolver qué invokerTx consultar en RHO
-      let invokerTxToTrace: string[] = [];
-
-      const iterateAllInvokerTx =
-        (filters as MetricsFilters & { iterateAllInvokerTx?: boolean }).iterateAllInvokerTx === true;
-
-      if (iterateAllInvokerTx) {
-        invokerTxToTrace = Array.from(
-          new Set(
-            metricRows
-              .map((r) => r.invokerTx)
-              .filter((v): v is string => Boolean(v && String(v).trim()))
-          )
-        );
-      } else if (filters.invokerTx?.trim()) {
-        invokerTxToTrace = [filters.invokerTx.trim()];
-      }
-
-      // 3) Fetch trazas
       let allSpans: NormalizedSpan[] = [];
 
-      if (invokerTxToTrace.length > 0) {
-        allSpans = await fetchSpansForManyInvokerTx(
-          filters,
-          invokerTxToTrace,
-          setProgress
-        );
+      if (filters.searchMode === "rho" && filters.invokerTx) {
+        setProgress(`Obteniendo trazas de ${filters.invokerTx}...`);
+        allSpans = await fetchSpans(filters, filters.invokerTx);
       }
 
-      // 4) Clasificar y KPIs
-      const dedupedSpans = dedupeSpans(allSpans);
-      const cls = classifySpans(dedupedSpans);
+      setSpans(allSpans);
 
-      setSpans(dedupedSpans);
+      const cls = classifySpans(allSpans);
       setClassified(cls);
-      setKpis(computeKPIs(metricRows, dedupedSpans));
+      setKpis(computeKPIs(metricRows, allSpans));
 
       toast.success(
-        `Consulta completada: ${metricRows.length} métricas, ${dedupedSpans.length} trazas, ${invokerTxToTrace.length} invokerTx`
+        `Consulta completada: ${metricRows.length} métricas, ${allSpans.length} trazas`
       );
     } catch (err) {
-      console.error(err);
       const msg = err instanceof Error ? err.message : "Error desconocido";
+      console.error("[Dashboard] Error:", err);
       setMetricsError(msg);
       toast.error(`Error: ${msg}`);
     } finally {
@@ -204,9 +100,7 @@ export default function Dashboard() {
             </div>
             <div>
               <h1 className="text-sm font-bold tracking-tight">BBVA Observability</h1>
-              <p className="text-xs text-muted-foreground">
-                Métricas & Trazas Dashboard
-              </p>
+              <p className="text-xs text-muted-foreground">Métricas & Trazas Dashboard</p>
             </div>
           </div>
 
@@ -219,14 +113,14 @@ export default function Dashboard() {
 
         {loading && (
           <div className="rounded-lg border border-primary/30 bg-primary/5 p-4 flex items-center gap-3">
-            <div className="h-3 w-3 rounded-full bg-primary animate-pulse-glow" />
+            <div className="h-3 w-3 rounded-full bg-primary animate-pulse" />
             <span className="text-sm font-mono text-primary">{progress}</span>
           </div>
         )}
 
         <KPIDashboard kpis={kpis} />
 
-        <Tabs defaultValue="charts" className="space-y-4">
+        <Tabs defaultValue="metrics" className="space-y-4">
           <TabsList className="bg-card border border-border">
             <TabsTrigger value="charts" className="text-xs">
               Gráficas
@@ -244,7 +138,11 @@ export default function Dashboard() {
           </TabsContent>
 
           <TabsContent value="metrics">
-            <MetricsTable rows={rows} loading={loading} errorMessage={metricsError} />
+            <MetricsTable
+              rows={rows}
+              loading={loading}
+              errorMessage={metricsError}
+            />
           </TabsContent>
 
           <TabsContent value="traces">
@@ -252,7 +150,7 @@ export default function Dashboard() {
               <TracesView classified={classified} allSpans={spans} />
             ) : (
               <div className="rounded-lg border border-border bg-card p-8 text-center text-muted-foreground">
-                Ejecuta la consulta para ver las trazas de los invokerTx.
+                Ejecuta una consulta RHO con un invokerTx para ver trazas.
               </div>
             )}
           </TabsContent>

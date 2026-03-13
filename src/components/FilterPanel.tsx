@@ -25,7 +25,7 @@ import { Calendar } from "@/components/ui/calendar";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 
-import { UTILITY_TYPES, type MetricsFilters } from "@/types/bbva";
+import { UTILITY_TYPES, type MetricsFilters, type SearchMode } from "@/types/bbva";
 
 interface FilterPanelProps {
   onSearch: (filters: MetricsFilters) => void;
@@ -34,13 +34,11 @@ interface FilterPanelProps {
 
 const SITES = ["LIVE-01", "LIVE-02", "LIVE-03", "LIVE-04", "LIVE-05"];
 
-const SEARCH_MODES = [
+const SEARCH_MODES: Array<{ value: SearchMode; label: string }> = [
   { value: "pipeline", label: "Pipeline completo (todos los invokerTx)" },
   { value: "utility", label: "Utility metrics" },
   { value: "rho", label: "RHO trazas" },
-] as const;
-
-type SearchMode = (typeof SEARCH_MODES)[number]["value"];
+];
 
 function atStartOfDay(date: Date): Date {
   const d = new Date(date);
@@ -89,12 +87,10 @@ export default function FilterPanel({ onSearch, loading = false }: FilterPanelPr
     }
 
     const parsedLimit = Number(limit);
-    const normalizedFrom = atStartOfDay(fromDate);
-    const normalizedTo = atEndOfDay(toDate);
 
     const filters: MetricsFilters = {
-      fromDate: normalizedFrom,
-      toDate: normalizedTo,
+      fromDate: atStartOfDay(fromDate),
+      toDate: atEndOfDay(toDate),
       site: site || undefined,
       invokerTx: isPipelineMode ? undefined : invokerTx.trim() || undefined,
       utilityType: utilityType === "all" ? undefined : utilityType,
@@ -103,7 +99,8 @@ export default function FilterPanel({ onSearch, loading = false }: FilterPanelPr
       searchMode,
       iterateAllInvokerTx: isPipelineMode,
     };
-    
+
+    console.debug("[FilterPanel] filters =", filters);
     onSearch(filters);
   };
 
@@ -162,18 +159,14 @@ export default function FilterPanel({ onSearch, loading = false }: FilterPanelPr
             </span>
           )}
         </div>
-
-        <p className="text-xs text-muted-foreground">
-          El token se usa solo en memoria. En modo pipeline se consulta MU para obtener todos los invokerTx.
-        </p>
       </div>
 
       {isPipelineMode && (
         <div className="rounded-md border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-400 flex items-start gap-2">
           <Layers3 className="h-4 w-4 mt-0.5 shrink-0" />
           <div>
-            Se consultará primero el endpoint MU con <span className="font-mono">aggregate="invokerTx"</span>.
-            Después se tomarán todos los <span className="font-mono">bucket.invokerTx</span> y se mandarán a la tabla.
+            Se consultará primero MU para obtener todos los <span className="font-mono">invokerTx</span>,
+            y luego se construirán las métricas que se renderizan en la tabla.
           </div>
         </div>
       )}
@@ -185,13 +178,10 @@ export default function FilterPanel({ onSearch, loading = false }: FilterPanelPr
             <PopoverTrigger asChild>
               <Button
                 variant="outline"
-                className={cn(
-                  "w-full justify-start text-left font-mono text-xs",
-                  !fromDate && "text-muted-foreground"
-                )}
+                className={cn("w-full justify-start text-left font-mono text-xs")}
               >
                 <CalendarIcon className="mr-1.5 h-3.5 w-3.5" />
-                {fromDate ? format(fromDate, "yyyy-MM-dd") : "Seleccionar"}
+                {format(fromDate, "yyyy-MM-dd")}
               </Button>
             </PopoverTrigger>
             <PopoverContent className="w-auto p-0" align="start">
@@ -211,13 +201,10 @@ export default function FilterPanel({ onSearch, loading = false }: FilterPanelPr
             <PopoverTrigger asChild>
               <Button
                 variant="outline"
-                className={cn(
-                  "w-full justify-start text-left font-mono text-xs",
-                  !toDate && "text-muted-foreground"
-                )}
+                className={cn("w-full justify-start text-left font-mono text-xs")}
               >
                 <CalendarIcon className="mr-1.5 h-3.5 w-3.5" />
-                {toDate ? format(toDate, "yyyy-MM-dd") : "Seleccionar"}
+                {format(toDate, "yyyy-MM-dd")}
               </Button>
             </PopoverTrigger>
             <PopoverContent className="w-auto p-0" align="start">
@@ -247,20 +234,16 @@ export default function FilterPanel({ onSearch, loading = false }: FilterPanelPr
           </Select>
         </div>
 
-       <div className="space-y-1.5">
-  <Label className="text-xs text-muted-foreground">InvokerTx</Label>
-  <Input
-    placeholder={
-      isPipelineMode
-        ? "Automático: se toman todos desde MU"
-        : "Ej: KUSUT05402ZZ"
-    }
-    className="font-mono text-xs"
-    value={isPipelineMode ? "" : invokerTx}
-    onChange={(e) => setInvokerTx(e.target.value.toUpperCase())}
-    disabled={isPipelineMode}
-  />
-</div>
+        <div className="space-y-1.5">
+          <Label className="text-xs text-muted-foreground">InvokerTx</Label>
+          <Input
+            placeholder={isPipelineMode ? "Automático: se toman todos desde MU" : "Ej: KUSUT05402ZZ"}
+            className="font-mono text-xs"
+            value={invokerTx}
+            onChange={(e) => setInvokerTx(e.target.value.toUpperCase())}
+            disabled={isPipelineMode}
+          />
+        </div>
 
         <div className="space-y-1.5">
           <Label className="text-xs text-muted-foreground">Utility Type</Label>

@@ -1,237 +1,173 @@
 // ============================================================
-// Generic URL builders for MU and RHO endpoints
+// URL Builders for MU and RHO
 // ============================================================
 import type {
-  MetricSetName,
+  AggregateField,
   MetricMethod,
-  OperationType,
+  MetricSetName,
   NanoTimestamp,
+  OperationType,
 } from "@/types/bbva";
 
-const MU_REAL_BASE = "https://mu.live-02.platform.bbva.com";
-const MU_PROXY_BASE = "http://localhost:8080/api/mu";
+const DEFAULT_MU_BASE =
+  import.meta.env.VITE_MU_BASE_URL ||
+  "https://mu.live-02.nextgen.igrupobbva";
 
-const RHO_REAL_BASE = "https://rho.live-02.nextgen.igrupobbva";
-const RHO_PROXY_BASE = "http://localhost:8080/api/rho";
+const DEFAULT_RHO_BASE =
+  import.meta.env.VITE_RHO_BASE_URL ||
+  "https://rho.live-02.nextgen.igrupobbva";
 
-export interface MetricsUrlParams {
+function ensureQuoted(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) return trimmed;
+  return `"${trimmed}"`;
+}
+
+function clean(value: string): string {
+  return String(value ?? "").trim();
+}
+
+// -------------------------
+// Query builders
+// -------------------------
+export function buildSiteFilter(site: string): string {
+  return `"site" == "${clean(site)}"`;
+}
+
+export function buildInvokerTxFilter(invokerTx: string): string {
+  return `"invokerTx" == "${clean(invokerTx)}"`;
+}
+
+export function buildInvokerLibraryFilter(invokerLibrary: string): string {
+  return `"invokerLibrary" == "${clean(invokerLibrary)}"`;
+}
+
+export function buildUtilityTypeFilter(utilityType: string): string {
+  return `utilitytype="${clean(utilityType)}"`;
+}
+
+export function buildUtilityTypeOrQuery(types: string[]): string {
+  const valid = types.map(clean).filter(Boolean);
+  return `(${valid.map((t) => `utilitytype="${t}"`).join(" or ")})`;
+}
+
+export function buildCompoundQuery(
+  ...parts: Array<string | undefined | null | false>
+): string {
+  return parts
+    .map((part) => (typeof part === "string" ? part.trim() : ""))
+    .filter(Boolean)
+    .join(" AND ");
+}
+
+export function buildInvokedParamQuery(params: {
+  invokerTx: string;
+  invokerLibrary: string;
+  utilityTypes: string[];
+}): string {
+  const left = `("invokerTx" == "${clean(params.invokerTx)}" AND "invokerLibrary" == "${clean(
+    params.invokerLibrary
+  )}")`;
+  const right = buildUtilityTypeOrQuery(params.utilityTypes);
+  return `${left} AND ${right}`;
+}
+
+// -------------------------
+// MU builders
+// -------------------------
+export function buildMetricsUrl(params: {
   metricSet: MetricSetName;
   method: MetricMethod;
   fromTimestamp: NanoTimestamp;
   toTimestamp: NanoTimestamp;
   propertiesSize?: number;
-  granularity?: string;
-  aggregate: string;
+  aggregate: AggregateField;
   q: string;
   operations: OperationType[];
-  useProxy?: boolean; // false = real BBVA endpoint
-}
-
-function ensureQuoted(value: string): string {
-  const trimmed = value.trim();
-  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
-    return trimmed;
-  }
-  return `"${trimmed}"`;
-}
-
-function escapeQueryValue(value: string): string {
-  return String(value).replace(/"/g, '\\"').trim();
-}
-
-export function buildMetricsUrl(params: MetricsUrlParams): string {
+  baseUrl?: string;
+}): string {
   const {
     metricSet,
     method,
     fromTimestamp,
     toTimestamp,
     propertiesSize = 20000,
-    granularity,
     aggregate,
     q,
     operations,
-    useProxy = false,
+    baseUrl = DEFAULT_MU_BASE,
   } = params;
 
-  if (!fromTimestamp) {
-    throw new Error("fromTimestamp es requerido");
-  }
-
-  if (!toTimestamp) {
-    throw new Error("toTimestamp es requerido");
-  }
-
-  if (!aggregate?.trim()) {
-    throw new Error("aggregate es requerido");
-  }
-
-  if (!q?.trim()) {
-    throw new Error("q es requerido");
-  }
-
-  if (!operations?.length) {
-    throw new Error("Debe existir al menos una operation");
-  }
-
-  const base = useProxy ? MU_PROXY_BASE : MU_REAL_BASE;
-
   const url = new URL(
-    `${base}/v0/ns/apx.online/metric-sets/${metricSet}:${method}`
+    `/v0/ns/apx.online/metric-sets/${metricSet}:${method}`,
+    baseUrl
   );
 
-  url.searchParams.set("fromTimestamp", String(fromTimestamp));
-  url.searchParams.set("toTimestamp", String(toTimestamp));
-
-  if (method === "listAggregations") {
-    url.searchParams.set("propertiesSize", String(propertiesSize));
-  }
-
-  if (method === "listTimeseries") {
-    if (!granularity?.trim()) {
-      throw new Error("granularity es requerida para listTimeseries");
-    }
-    url.searchParams.set("granularity", granularity);
-  }
-
+  url.searchParams.set("fromTimestamp", fromTimestamp);
+  url.searchParams.set("toTimestamp", toTimestamp);
+  url.searchParams.set("propertiesSize", String(propertiesSize));
   url.searchParams.set("aggregate", ensureQuoted(aggregate));
-  url.searchParams.set("q", q.trim());
+  url.searchParams.set("q", q);
 
   for (const op of operations) {
-    if (op?.trim()) {
-      url.searchParams.append("operation", op.trim());
-    }
+    url.searchParams.append("operation", op);
   }
 
   return url.toString();
 }
 
-// ============================================================
-// Query builders
-// ============================================================
-
-export function buildEqFilter(field: string, value: string): string {
-  return `${ensureQuoted(field)} == ${ensureQuoted(escapeQueryValue(value))}`;
-}
-
-export function buildSiteFilter(site: string, field = "site"): string {
-  return buildEqFilter(field, site);
-}
-
-export function buildInvokerTxFilter(
-  invokerTx: string,
-  field = "invokerTx"
-): string {
-  return buildEqFilter(field, invokerTx);
-}
-
-export function buildUtilityTypeFilter(
-  utilityType: string,
-  field = "utilitytype"
-): string {
-  return buildEqFilter(field, utilityType);
-}
-
-export function buildStartsWithFilter(field: string, value: string): string {
-  return `${ensureQuoted(field)} == ${ensureQuoted(
-    `${escapeQueryValue(value)}*`
-  )}`;
-}
-
-export function buildCompoundQuery(
-  ...parts: Array<string | undefined | null>
-): string {
-  const clean = parts
-    .map((part) => part?.trim())
-    .filter((part): part is string => Boolean(part));
-
-  return clean.join(" AND ");
-}
-
-export function wrapQuery(query: string): string {
-  const clean = query.trim();
-  if (!clean) return clean;
-  if (clean.startsWith("(") && clean.endsWith(")")) {
-    return clean;
-  }
-  return `(${clean})`;
-}
-
-export function buildOrQuery(field: string, values: string[]): string {
-  const cleanValues = values
-    .map((v) => v?.trim())
-    .filter((v): v is string => Boolean(v));
-
-  if (!cleanValues.length) {
-    throw new Error(`No hay valores para construir OR en ${field}`);
-  }
-
-  return wrapQuery(
-    cleanValues.map((v) => buildEqFilter(field, v)).join(" OR ")
-  );
-}
-
-export function buildUtilityTypeOrQuery(types: string[]): string {
-  return buildOrQuery("utilitytype", types);
-}
-
-// ============================================================
-// RHO URL builder
-// ============================================================
-
-export interface RhoSpansUrlParams {
+// -------------------------
+// RHO builders
+// -------------------------
+export function buildRhoSpanSearchUrl(params: {
   invokerTx: string;
-  site: string;
-  fromTimestamp: NanoTimestamp;
-  toTimestamp: NanoTimestamp;
-  useProxy?: boolean; // false = real BBVA endpoint
-  sort?: "ascending" | "descending";
-  profile?: string;
-  properties?: string[];
-}
-
-export function buildRhoSpansUrl(params: RhoSpansUrlParams): string {
+  fromDate: NanoTimestamp;
+  toDate: NanoTimestamp;
+  baseUrl?: string;
+}): string {
   const {
     invokerTx,
-    site,
-    fromTimestamp,
-    toTimestamp,
-    useProxy = false,
-    sort = "ascending",
-    profile = "default",
-    properties = ["channel-code", "environ-code", "env", "product-code", "returncode"],
+    fromDate,
+    toDate,
+    baseUrl = DEFAULT_RHO_BASE,
   } = params;
 
-  if (!invokerTx?.trim()) {
-    throw new Error("invokerTx es requerido");
-  }
+  const url = new URL("/v1/ns/apx.online/spans", baseUrl);
+  url.searchParams.set("q", `name == "${clean(invokerTx)}"`);
+  url.searchParams.set("sort", "ascending");
+  url.searchParams.set("fromDate", fromDate);
+  url.searchParams.set("toDate", toDate);
+  url.searchParams.set(
+    "properties",
+    "channel-code,environ-code,env,product-code,returncode"
+  );
+  url.searchParams.set("profile", "default");
 
-  if (!site?.trim()) {
-    throw new Error("site es requerido");
-  }
+  return url.toString();
+}
 
-  if (!fromTimestamp) {
-    throw new Error("fromTimestamp es requerido");
-  }
+export function buildRhoTraceUrl(params: {
+  spanId: string;
+  fromDate: NanoTimestamp;
+  toDate: NanoTimestamp;
+  baseUrl?: string;
+}): string {
+  const {
+    spanId,
+    fromDate,
+    toDate,
+    baseUrl = DEFAULT_RHO_BASE,
+  } = params;
 
-  if (!toTimestamp) {
-    throw new Error("toTimestamp es requerido");
-  }
-
-  const q = buildCompoundQuery(
-    buildEqFilter("name", "**"),
-    buildStartsWithFilter("properties.invokerTx", invokerTx),
-    buildEqFilter("properties.site", site)
+  const url = new URL(
+    `/v1/ns/apx.online/mrs/RhoTraces/spans/${clean(spanId)}:trace`,
+    baseUrl
   );
 
-  const base = useProxy ? RHO_PROXY_BASE : RHO_REAL_BASE;
-
-  const url = new URL(`${base}/v1/ns/apx.online/spans`);
-  url.searchParams.set("q", q);
-  url.searchParams.set("sort", sort);
-  url.searchParams.set("fromDate", String(fromTimestamp));
-  url.searchParams.set("toDate", String(toTimestamp));
-  url.searchParams.set("properties", properties.join(","));
-  url.searchParams.set("profile", profile);
+  url.searchParams.set("fromDate", fromDate);
+  url.searchParams.set("toDate", toDate);
+  url.searchParams.set("profile", "default");
+  url.searchParams.set("crossRegion", "false");
 
   return url.toString();
 }

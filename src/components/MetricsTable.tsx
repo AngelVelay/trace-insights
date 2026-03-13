@@ -1,6 +1,6 @@
-import { useState, useMemo } from 'react';
-import type { MetricRow } from '@/types/bbva';
-import { formatDurationMs } from '@/services/dateUtils';
+import { useMemo, useState } from "react";
+import type { MetricRow } from "@/types/bbva";
+import { formatDurationMs } from "@/services/dateUtils";
 import {
   Table,
   TableBody,
@@ -8,9 +8,9 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from '@/components/ui/table';
-import { Input } from '@/components/ui/input';
-import { ArrowUpDown } from 'lucide-react';
+} from "@/components/ui/table";
+import { Input } from "@/components/ui/input";
+import { ArrowUpDown } from "lucide-react";
 
 interface MetricsTableProps {
   rows: MetricRow[];
@@ -25,19 +25,21 @@ export default function MetricsTable({
   loading = false,
   errorMessage = null,
 }: MetricsTableProps) {
-  const [search, setSearch] = useState('');
-  const [sortKey, setSortKey] = useState<SortKey>('utility_count');
+  const [search, setSearch] = useState("");
+  const [sortKey, setSortKey] = useState<SortKey>("utility_count");
   const [sortAsc, setSortAsc] = useState(false);
 
   const filtered = useMemo(() => {
+    console.debug("[MetricsTable] rows =", rows);
+
     const q = search.trim().toLowerCase();
 
     const result = rows.filter((r) => {
-      const site = String(r.site ?? '').toLowerCase();
-      const invokerTx = String(r.invokerTx ?? '').toLowerCase();
-      const invokedparam = String(r.invokedparam ?? '').toLowerCase();
-      const utilitytype = String(r.utilitytype ?? '').toLowerCase();
-      const invokerLibrary = String(r.invokerLibrary ?? '').toLowerCase();
+      const site = String(r.site ?? "").toLowerCase();
+      const invokerTx = String(r.invokerTx ?? "").toLowerCase();
+      const invokedparam = String(r.invokedparam ?? "").toLowerCase();
+      const utilitytype = String(r.utilitytype ?? "").toLowerCase();
+      const invokerLibrary = String(r.invokerLibrary ?? "").toLowerCase();
 
       return (
         site.includes(q) ||
@@ -52,35 +54,36 @@ export default function MetricsTable({
       const av = a[sortKey];
       const bv = b[sortKey];
 
-      if (typeof av === 'number' && typeof bv === 'number') {
+      if (typeof av === "number" && typeof bv === "number") {
         return sortAsc ? av - bv : bv - av;
       }
 
       return sortAsc
-        ? String(av ?? '').localeCompare(String(bv ?? ''))
-        : String(bv ?? '').localeCompare(String(av ?? ''));
+        ? String(av ?? "").localeCompare(String(bv ?? ""))
+        : String(bv ?? "").localeCompare(String(av ?? ""));
     });
 
+    console.debug("[MetricsTable] filtered =", result.length);
     return result;
   }, [rows, search, sortKey, sortAsc]);
 
   const hasSearch = search.trim().length > 0;
 
-  let emptyStateMessage = 'Sin datos. Ejecuta una consulta para ver métricas.';
+  let emptyStateMessage = "Sin datos. Ejecuta una consulta para ver métricas.";
 
   if (loading) {
-    emptyStateMessage = 'Cargando métricas...';
+    emptyStateMessage = "Cargando métricas...";
   } else if (errorMessage) {
     emptyStateMessage = `Error cargando métricas: ${errorMessage}`;
   } else if (rows.length === 0) {
-    emptyStateMessage = 'La consulta terminó, pero no devolvió métricas.';
+    emptyStateMessage = "La consulta terminó, pero no devolvió métricas.";
   } else if (hasSearch && filtered.length === 0) {
     emptyStateMessage = `No hay coincidencias para "${search.trim()}".`;
   }
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) {
-      setSortAsc(!sortAsc);
+      setSortAsc((prev) => !prev);
     } else {
       setSortKey(key);
       setSortAsc(false);
@@ -99,15 +102,13 @@ export default function MetricsTable({
     </TableHead>
   );
 
-  console.log('rows', rows);
-  console.log('filtered', filtered);
-
   return (
     <div className="rounded-lg border border-border bg-card">
       <div className="p-3 border-b border-border flex items-center justify-between">
         <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">
           Métricas {hasSearch ? `(${filtered.length}/${rows.length})` : `(${rows.length})`}
         </h3>
+
         <Input
           placeholder="Buscar..."
           className="max-w-xs text-xs font-mono"
@@ -116,7 +117,7 @@ export default function MetricsTable({
         />
       </div>
 
-      <div className="overflow-x-auto scrollbar-thin max-h-[500px] overflow-y-auto">
+      <div className="overflow-x-auto max-h-[500px] overflow-y-auto">
         <Table>
           <TableHeader>
             <TableRow>
@@ -142,30 +143,22 @@ export default function MetricsTable({
             ) : (
               filtered.map((row, i) => (
                 <TableRow
-                  key={`${row.invokerTx ?? 'no-tx'}-${row.utilitytype ?? 'no-ut'}-${row.invokedparam ?? 'no-param'}-${i}`}
+                  key={`${row.invokerTx}-${row.invokerLibrary}-${row.utilitytype}-${row.invokedparam}-${i}`}
                   className="font-mono text-xs"
                 >
-                  <TableCell>{row.site ?? '-'}</TableCell>
-                  <TableCell className="text-primary font-medium">{row.invokerTx ?? '-'}</TableCell>
-                  <TableCell>{row.invokerLibrary ?? '-'}</TableCell>
+                  <TableCell>{row.site}</TableCell>
+                  <TableCell className="text-primary font-medium">{row.invokerTx}</TableCell>
+                  <TableCell>{row.invokerLibrary}</TableCell>
                   <TableCell>
                     <span className="inline-block rounded bg-secondary px-1.5 py-0.5 text-secondary-foreground">
-                      {row.utilitytype ?? '-'}
+                      {row.utilitytype}
                     </span>
                   </TableCell>
-                  <TableCell className="max-w-[200px] truncate">{row.invokedparam ?? '-'}</TableCell>
-                  <TableCell className="text-right">
-                    {Number(row.utility_count ?? 0).toLocaleString()}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    {formatDurationMs(Number(row.min_utility_duration ?? 0))}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    {formatDurationMs(Number(row.mean_utility_duration ?? 0))}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    {formatDurationMs(Number(row.max_utility_duration ?? 0))}
-                  </TableCell>
+                  <TableCell className="max-w-[220px] truncate">{row.invokedparam}</TableCell>
+                  <TableCell className="text-right">{row.utility_count.toLocaleString()}</TableCell>
+                  <TableCell className="text-right">{formatDurationMs(row.min_utility_duration)}</TableCell>
+                  <TableCell className="text-right">{formatDurationMs(row.mean_utility_duration)}</TableCell>
+                  <TableCell className="text-right">{formatDurationMs(row.max_utility_duration)}</TableCell>
                 </TableRow>
               ))
             )}

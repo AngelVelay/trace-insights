@@ -14,7 +14,9 @@ import {
   buildCompoundQuery,
   buildSiteFilter,
   buildInvokerTxFilter,
+  buildInvokerLibraryFilter,
   buildUtilityTypeFilter,
+  buildInvokedParamQuery,
 } from "./urlBuilder";
 import {
   apiRequest,
@@ -22,49 +24,19 @@ import {
   createConcurrencyLimiter,
 } from "./httpClient";
 
-const limiter = createConcurrencyLimiter(4);
+const limiter = createConcurrencyLimiter(5);
 
 function extractBuckets(res: AggregationResponse): AggregationBucket[] {
-  if (Array.isArray(res?.data)) return res.data;
-  if (Array.isArray(res?.aggregations)) return res.aggregations;
-  return [];
+  return res.data ?? res.aggregations ?? [];
 }
 
-function uniqueStrings(values: Array<string | undefined | null>): string[] {
-  return Array.from(
-    new Set(
-      values
-        .map((v) => (typeof v === "string" ? v.trim() : ""))
-        .filter(Boolean)
-    )
-  );
-}
-
-function buildEqFilter(field: string, value?: string): string | undefined {
-  if (!value?.trim()) return undefined;
-  return `"${field}" == "${value.trim().replace(/"/g, '\\"')}"`;
-}
-
-// ---- Generic aggregation fetch ----
 async function fetchAggregation(
   filters: MetricsFilters,
-  aggregate: string,
+  aggregate: "invokerTx" | "utilitytype" | "invokerLibrary" | "invokedparam" | "name",
   operations: OperationType[],
-  extraQ?: string
+  q: string
 ): Promise<AggregationBucket[]> {
   const { from, to } = dateRangeToNano(filters.fromDate, filters.toDate);
-
-  const qParts = [
-    filters.site ? buildSiteFilter(filters.site) : undefined,
-    filters.invokerTx ? buildInvokerTxFilter(filters.invokerTx) : undefined,
-    filters.utilityType ? buildUtilityTypeFilter(filters.utilityType) : undefined,
-    filters.invokerLibrary
-      ? buildEqFilter("invokerLibrary", filters.invokerLibrary)
-      : undefined,
-    extraQ,
-  ];
-
-  const q = buildCompoundQuery(...qParts);
 
   const url = buildMetricsUrl({
     metricSet: "utility-metric-set",
@@ -77,197 +49,147 @@ async function fetchAggregation(
   });
 
   const headers = buildAuthHeaders(filters.bearerToken);
+
+  console.debug("[MU] Request:", url);
+
   const res = await limiter(() =>
     apiRequest<AggregationResponse>(url, { headers })
   );
 
-  return extractBuckets(res);
+  const buckets = extractBuckets(res);
+  console.debug("[MU] Buckets:", aggregate, buckets.length);
+
+  return buckets;
 }
 
-// ---- Functional dashboard ----
-export async function fetchFunctionalDashboard(
-  filters: MetricsFilters
-): Promise<AggregationBucket[]> {
-  const { from, to } = dateRangeToNano(filters.fromDate, filters.toDate);
-  const q = filters.site ? `"properties.site" == "${filters.site}"` : "";
+export async function fetchInvokerTxList(filters: MetricsFilters): Promise<string[]> {
+  const q = filters.site ? buildSiteFilter(filters.site) : "";
+  const buckets = await fetchAggregation(filters, "invokerTx", ["count:utility_count"], q);
 
-  const url = buildMetricsUrl({
-    metricSet: "functional-dashboard",
-    method: "listAggregations",
-    fromTimestamp: from,
-    toTimestamp: to,
-    aggregate: "name",
-    q,
-    operations: [
-      "sum:num_executions",
-      "mean:span_duration",
-      "sum:technical_error",
-      "sum:functional_error",
-    ],
+  return buckets
+    .map((b) => b.bucket?.invokerTx)
+    .filter((v): v is string => Boolean(v?.trim()));
+}
+
+export async function fetchUtilityTypes(
+  filters: MetricsFilters,
+  invokerTx: string
+): Promise<string[]> {
+  const q = buildInvokerTxFilter(invokerTx);
+  const buckets = await fetchAggregation(filters, "utilitytype", ["count:utility_count"], q);
+
+  return buckets
+    .map((b) => b.bucket?.utilitytype)
+    .filter((v): v is string => Boolean(v?.trim()));
+}
+
+export async function fetchInvokerLibraries(
+  filters: MetricsFilters,
+  invokerTx: string,
+  utilityType?: string
+): Promise<string[]> {
+  const q = buildCompoundQuery(
+    buildInvokerTxFilter(invokerTx),
+    utilityType ? buildUtilityTypeFilter(utilityType) : undefined
+  );
+
+  const buckets = await fetchAggregation(filters, "invokerLibrary", ["count:utility_count"], q);
+
+  return buckets
+    .map((b) => b.bucket?.invokerLibrary)
+    .filter((v): v is string => Boolean(v?.trim()));
+}
+
+export async function fetchInvokedParams(
+  filters: MetricsFilters,
+  invokerTx: string,
+  invokerLibrary: string,
+  utilityTypes: string[]
+): Promise<AggregationBucket[]> {
+  const q = buildInvokedParamQuery({
+    invokerTx,
+    invokerLibrary,
+    utilityTypes,
   });
 
-  const headers = buildAuthHeaders(filters.bearerToken);
-  const res = await limiter(() =>
-    apiRequest<AggregationResponse>(url, { headers })
+  return fetchAggregation(
+    filters,
+    "invokedparam",
+    [
+      "count:utility_count",
+      "min:utility_duration",
+      "mean:utility_duration",
+      "max:utility_duration",
+    ],
+    q
   );
-
-  return extractBuckets(res);
 }
 
-// ---- Get invokerTx list ----
-export async function fetchInvokerTxList(
-  filters: MetricsFilters
-): Promise<string[]> {
-  const buckets = await fetchAggregation(filters, "invokerTx", [
-    "count:utility_count",
-  ]);
-
-  return uniqueStrings(buckets.map((b) => b.bucket?.invokerTx));
-}
-
-// ---- Get utility types for an invokerTx ----
-export async function fetchUtilityTypes(
-  filters: MetricsFilters
-): Promise<string[]> {
-  const buckets = await fetchAggregation(filters, "utilitytype", [
-    "count:utility_count",
-  ]);
-
-  return uniqueStrings(buckets.map((b) => b.bucket?.utilitytype));
-}
-
-// ---- Get invoker libraries ----
-export async function fetchInvokerLibraries(
-  filters: MetricsFilters
-): Promise<string[]> {
-  const buckets = await fetchAggregation(filters, "invokerLibrary", [
-    "count:utility_count",
-  ]);
-
-  return uniqueStrings(buckets.map((b) => b.bucket?.invokerLibrary));
-}
-
-// ---- Get invoked params with durations ----
-export async function fetchInvokedParams(
-  filters: MetricsFilters
-): Promise<AggregationBucket[]> {
-  return fetchAggregation(filters, "invokedparam", [
-    "count:utility_count",
-    "min:utility_duration",
-    "mean:utility_duration",
-    "max:utility_duration",
-  ]);
-}
-
-// ---- Full iteration: build MetricRows ----
 export async function fetchFullMetrics(
   baseFilters: MetricsFilters,
   onProgress?: (msg: string) => void
 ): Promise<MetricRow[]> {
   const rows: MetricRow[] = [];
-  const rowKeys = new Set<string>();
-
-  onProgress?.("Obteniendo invokerTx...");
+  const site = baseFilters.site ?? "";
 
   let invokerTxList: string[] = [];
 
-  // Si viene invokerTx específico, usar solo ese
-  if (baseFilters.invokerTx?.trim()) {
-    invokerTxList = [baseFilters.invokerTx.trim()];
-  } else {
+  if (baseFilters.iterateAllInvokerTx || baseFilters.searchMode === "pipeline") {
+    onProgress?.("Obteniendo invokerTx desde MU...");
     invokerTxList = await fetchInvokerTxList(baseFilters);
+  } else if (baseFilters.invokerTx?.trim()) {
+    invokerTxList = [baseFilters.invokerTx.trim()];
   }
 
   if (baseFilters.limit && baseFilters.limit > 0) {
     invokerTxList = invokerTxList.slice(0, baseFilters.limit);
   }
 
-  onProgress?.(`Encontrados ${invokerTxList.length} invokerTx`);
-
-  let txIndex = 0;
+  onProgress?.(`InvokerTx encontrados: ${invokerTxList.length}`);
+  console.debug("[Pipeline] invokerTxList =", invokerTxList);
 
   for (const invokerTx of invokerTxList) {
-    txIndex += 1;
+    onProgress?.(`Procesando invokerTx: ${invokerTx}`);
 
-    const txFilters: MetricsFilters = {
-      ...baseFilters,
-      invokerTx,
-    };
+    const utilityTypes =
+      baseFilters.utilityType?.trim()
+        ? [baseFilters.utilityType.trim()]
+        : await fetchUtilityTypes(baseFilters, invokerTx);
 
-    onProgress?.(
-      `Procesando invokerTx ${txIndex}/${invokerTxList.length}: ${invokerTx}`
-    );
+    console.debug(`[Pipeline] ${invokerTx} utilityTypes =`, utilityTypes);
 
-    const utilityTypes = await fetchUtilityTypes(txFilters);
+    for (const utilityType of utilityTypes) {
+      const libraries = await fetchInvokerLibraries(
+        baseFilters,
+        invokerTx,
+        utilityType
+      );
 
-    for (const utilitytype of utilityTypes) {
-      const utFilters: MetricsFilters = {
-        ...txFilters,
-        utilityType: utilitytype,
-      };
-
-      const libraries = await fetchInvokerLibraries(utFilters);
-
-      // Si no hay librerías, intentamos aún así con invokedparam
-      if (!libraries.length) {
-        const params = await fetchInvokedParams(utFilters);
-
-        for (const p of params) {
-          const key = [
-            baseFilters.site ?? "",
-            invokerTx,
-            utilitytype,
-            "",
-            p.bucket?.invokedparam ?? "",
-          ].join("|");
-
-          if (rowKeys.has(key)) continue;
-          rowKeys.add(key);
-
-          rows.push({
-            site: baseFilters.site ?? "",
-            invokerTx,
-            invokerLibrary: "",
-            utilitytype,
-            invokedparam: p.bucket?.invokedparam ?? "",
-            utility_count: p.values?.count_utility_count ?? 0,
-            min_utility_duration: p.values?.min_utility_duration ?? 0,
-            mean_utility_duration: p.values?.mean_utility_duration ?? 0,
-            max_utility_duration: p.values?.max_utility_duration ?? 0,
-          });
-        }
-
-        continue;
-      }
+      console.debug(
+        `[Pipeline] ${invokerTx} ${utilityType} libraries =`,
+        libraries
+      );
 
       for (const invokerLibrary of libraries) {
-        const libFilters: MetricsFilters = {
-          ...utFilters,
+        const params = await fetchInvokedParams(
+          baseFilters,
+          invokerTx,
           invokerLibrary,
-        };
+          [utilityType]
+        );
 
-        const params = await fetchInvokedParams(libFilters);
+        console.debug(
+          `[Pipeline] ${invokerTx} ${utilityType} ${invokerLibrary} params =`,
+          params.length
+        );
 
         for (const p of params) {
-          const invokedparam = p.bucket?.invokedparam ?? "";
-
-          const key = [
-            baseFilters.site ?? "",
-            invokerTx,
-            utilitytype,
-            invokerLibrary,
-            invokedparam,
-          ].join("|");
-
-          if (rowKeys.has(key)) continue;
-          rowKeys.add(key);
-
           rows.push({
-            site: baseFilters.site ?? "",
+            site,
             invokerTx,
             invokerLibrary,
-            utilitytype,
-            invokedparam,
+            utilitytype: utilityType,
+            invokedparam: p.bucket?.invokedparam ?? "",
             utility_count: p.values?.count_utility_count ?? 0,
             min_utility_duration: p.values?.min_utility_duration ?? 0,
             mean_utility_duration: p.values?.mean_utility_duration ?? 0,
@@ -278,5 +200,6 @@ export async function fetchFullMetrics(
     }
   }
 
+  console.debug("[Pipeline] rows =", rows.length, rows);
   return rows;
 }

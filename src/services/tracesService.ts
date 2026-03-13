@@ -7,88 +7,94 @@ import type {
   SpansPaginatedResponse,
   ClassifiedTraces,
   MetricsFilters,
-} from '@/types/bbva';
-import { dateRangeToNano } from './dateUtils';
-import { buildRhoSpansUrl } from './urlBuilder';
-import { apiRequest, buildAuthHeaders } from './httpClient';
+} from "@/types/bbva";
+import { dateRangeToNano } from "./dateUtils";
+import { buildRhoSpanSearchUrl, buildRhoTraceUrl } from "./urlBuilder";
+import { apiRequest, buildAuthHeaders } from "./httpClient";
 
-// ---- Normalize duration to ms ----
 function normalizeDuration(span: RawSpan): number {
-  if (span.duration != null) {
-    if (span.duration > 1e12) return span.duration / 1e6;
-    if (span.duration > 1e9) return span.duration / 1e3;
-    return span.duration;
+  if (typeof span.duration === "number" && span.duration !== null) {
+    const d = span.duration;
+
+    if (d < 1) {
+      return d * 1000;
+    }
+
+    if (d > 1_000_000) {
+      return d / 1_000_000;
+    }
+
+    if (d > 1_000) {
+      return d / 1000;
+    }
+
+    return d;
   }
 
-  if (span.startTime && span.endTime) {
-    const start = typeof span.startTime === 'string' ? Number(span.startTime) : span.startTime;
-    const end = typeof span.endTime === 'string' ? Number(span.endTime) : span.endTime;
-    const diff = end - start;
-    if (diff > 1e12) return diff / 1e6;
-    if (diff > 1e9) return diff / 1e3;
-    return diff;
+  if (
+    typeof span.startDate === "number" &&
+    typeof span.finishDate === "number" &&
+    span.finishDate >= span.startDate
+  ) {
+    return (span.finishDate - span.startDate) / 1_000_000;
   }
 
   return 0;
 }
 
-// ---- Infer utility type from span name ----
 function inferUtilityType(span: RawSpan): string {
   const ut = span.properties?.utilitytype;
   if (ut) return ut;
 
-  const name = (span.name ?? '').toLowerCase();
-  if (name.includes('cics') || name.includes('interbackend')) return 'InterBackendCics';
-  if (name.includes('apiinternalconnector') || name.includes('impl')) return 'APIInternalConnectorImpl';
-  if (name.includes('jdbc') || name.includes('jpa')) return 'Jdbc';
-  if (name.includes('mongo') || name.includes('daas')) return 'DaasMongoConnector';
-  if (name.includes('grpc')) return 'GRPCClient';
-  if (name.includes('titan')) return 'TitanClient';
-  if (name.includes('elastic')) return 'APIInternalConnectorImpl';
-  if (name.includes('couchbase')) return 'APIInternalConnectorImpl';
+  const name = (span.name ?? "").toLowerCase();
 
-  return 'other';
+  if (name.includes("jdbc")) return "Jdbc";
+  if (name.includes("mongo") || name.includes("daas")) return "DaasMongoConnector";
+  if (name.includes("cics") || name.includes("interbackend")) return "InterBackendCics";
+  if (name.includes("apiinternalconnector")) return "APIInternalConnectorImpl";
+
+  return "other";
 }
 
-// ---- Flatten hierarchical spans ----
 function flattenSpans(spans: RawSpan[]): RawSpan[] {
   const flat: RawSpan[] = [];
 
-  function recurse(span: RawSpan) {
+  const walk = (span: RawSpan) => {
     flat.push(span);
-    if (span.children) {
-      span.children.forEach(recurse);
+    if (Array.isArray(span.children)) {
+      span.children.forEach(walk);
     }
-  }
+  };
 
-  spans.forEach(recurse);
+  spans.forEach(walk);
   return flat;
 }
 
-// ---- Normalize spans ----
-export function normalizeSpans(raw: RawSpan[] | SpansPaginatedResponse): NormalizedSpan[] {
-  let allRaw: RawSpan[];
+export function normalizeSpans(
+  raw: RawSpan | RawSpan[] | SpansPaginatedResponse
+): NormalizedSpan[] {
+  let allRaw: RawSpan[] = [];
 
   if (Array.isArray(raw)) {
     allRaw = flattenSpans(raw);
-  } else if (raw.data) {
+  } else if ("data" in raw && Array.isArray(raw.data)) {
     allRaw = flattenSpans(raw.data);
-  } else {
-    allRaw = [];
+  } else if (raw && typeof raw === "object") {
+    allRaw = flattenSpans([raw as RawSpan]);
   }
 
   const seen = new Set<string>();
   const normalized: NormalizedSpan[] = [];
 
   for (const span of allRaw) {
-    const spanId = span.spanId ?? '';
+    const spanId = span.spanId ?? "";
     if (!spanId || seen.has(spanId)) continue;
     seen.add(spanId);
 
     normalized.push({
       spanId,
-      traceId: span.traceId ?? '',
-      name: span.name ?? '',
+      traceId: span.traceId ?? "",
+      name: span.name ?? "",
       durationMs: normalizeDuration(span),
       utilityType: inferUtilityType(span),
       properties: span.properties ?? {},
@@ -98,7 +104,6 @@ export function normalizeSpans(raw: RawSpan[] | SpansPaginatedResponse): Normali
   return normalized;
 }
 
-// ---- Classify normalized spans ----
 export function classifySpans(spans: NormalizedSpan[]): ClassifiedTraces {
   const result: ClassifiedTraces = {
     InterBackendCics: [],
@@ -120,27 +125,66 @@ export function classifySpans(spans: NormalizedSpan[]): ClassifiedTraces {
   return result;
 }
 
-// ---- Fetch spans with pagination ----
+async function searchSpanIds(
+  filters: MetricsFilters,
+  invokerTx: string
+): Promise<string[]> {
+  const { from, to } = dateRangeToNano(filters.fromDate, filters.toDate);
+  const headers = buildAuthHeaders(filters.bearerToken);
+
+  let nextUrl: string | null = buildRhoSpanSearchUrl({
+    invokerTx,
+    fromDate: from,
+    toDate: to,
+  });
+
+  const spanIds: string[] = [];
+
+  while (nextUrl) {
+    console.debug("[RHO search] Request:", nextUrl);
+
+    const res = await apiRequest<SpansPaginatedResponse>(nextUrl, { headers });
+
+    for (const span of res.data ?? []) {
+      if (span.spanId) spanIds.push(span.spanId);
+    }
+
+    nextUrl = res.pagination?.links?.next ?? null;
+  }
+
+  return [...new Set(spanIds)];
+}
+
 export async function fetchSpans(
   filters: MetricsFilters,
   invokerTx: string
 ): Promise<NormalizedSpan[]> {
   const { from, to } = dateRangeToNano(filters.fromDate, filters.toDate);
-  const site = filters.site ?? 'LIVE-04';
   const headers = buildAuthHeaders(filters.bearerToken);
 
-  let url: string | null = buildRhoSpansUrl({ invokerTx, site, fromTimestamp: from, toTimestamp: to });
-  const allRaw: RawSpan[] = [];
+  const spanIds = await searchSpanIds(filters, invokerTx);
+  console.debug("[RHO search] spanIds =", spanIds);
 
-  while (url) {
-    const res = await apiRequest<SpansPaginatedResponse>(url, { headers });
+  const allNormalized: NormalizedSpan[] = [];
 
-    if (res.data) {
-      allRaw.push(...res.data);
-    }
+  for (const spanId of spanIds) {
+    const url = buildRhoTraceUrl({
+      spanId,
+      fromDate: from,
+      toDate: to,
+    });
 
-    url = res.pagination?.links?.next ?? null;
+    console.debug("[RHO trace] Request:", url);
+
+    const trace = await apiRequest<RawSpan>(url, { headers });
+    const normalized = normalizeSpans(trace);
+    allNormalized.push(...normalized);
   }
 
-  return normalizeSpans(allRaw);
+  const dedup = new Map<string, NormalizedSpan>();
+  for (const span of allNormalized) {
+    dedup.set(span.spanId, span);
+  }
+
+  return [...dedup.values()];
 }
