@@ -19,8 +19,11 @@ export function fullDayRange(date: Date): { from: NanoTimestamp; to: NanoTimesta
   return { from: toNano(from), to: toNano(to) };
 }
 
-export function dateRangeToNano(from: Date, to: Date): { from: NanoTimestamp; to: NanoTimestamp } {
-  return { from: toNano(from), to: toNano(to) };
+export function dateRangeToNano(fromDate: Date, toDate: Date) {
+  return {
+    from: toNano(fromDate),
+    to: toNano(toDate),
+  };
 }
 
 export function formatDateDisplay(date: Date): string {

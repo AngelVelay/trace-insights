@@ -21,31 +21,23 @@ async function fetchWithTimeout(url: string, options: FetchOptions = {}): Promis
   }
 }
 
-export async function apiRequest<T>(url: string, options: FetchOptions = {}): Promise<T> {
-  const { maxRetries = 3, retryDelay = 1000, ...rest } = options;
 
-  let lastError: Error | null = null;
 
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      const response = await fetchWithTimeout(url, rest);
+export async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, init);
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
+  const text = await response.text();
 
-      return (await response.json()) as T;
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err));
-
-      if (attempt < maxRetries) {
-        const delay = retryDelay * Math.pow(2, attempt);
-        await new Promise((r) => setTimeout(r, delay));
-      }
-    }
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${text}`);
   }
 
-  throw lastError ?? new Error('Unknown error');
+  try {
+    return JSON.parse(text) as T;
+  } catch (error) {
+    console.error("Respuesta no JSON:", text);
+    throw new Error("La respuesta no es JSON válido");
+  }
 }
 
 // Build auth headers
@@ -87,4 +79,6 @@ export function createConcurrencyLimiter(maxConcurrent: number) {
       next();
     }
   };
+
+  
 }

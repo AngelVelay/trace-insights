@@ -1,7 +1,18 @@
 // ============================================================
-// Generic URL builder for MU metric endpoints
+// Generic URL builders for MU and RHO endpoints
 // ============================================================
-import type { MetricSetName, MetricMethod, OperationType, NanoTimestamp } from '@/types/bbva';
+import type {
+  MetricSetName,
+  MetricMethod,
+  OperationType,
+  NanoTimestamp,
+} from "@/types/bbva";
+
+const MU_REAL_BASE = "https://mu.live-02.platform.bbva.com";
+const MU_PROXY_BASE = "http://localhost:8080/api/mu";
+
+const RHO_REAL_BASE = "https://rho.live-02.nextgen.igrupobbva";
+const RHO_PROXY_BASE = "http://localhost:8080/api/rho";
 
 export interface MetricsUrlParams {
   metricSet: MetricSetName;
@@ -13,6 +24,19 @@ export interface MetricsUrlParams {
   aggregate: string;
   q: string;
   operations: OperationType[];
+  useProxy?: boolean; // false = real BBVA endpoint
+}
+
+function ensureQuoted(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    return trimmed;
+  }
+  return `"${trimmed}"`;
+}
+
+function escapeQueryValue(value: string): string {
+  return String(value).replace(/"/g, '\\"').trim();
 }
 
 export function buildMetricsUrl(params: MetricsUrlParams): string {
@@ -26,66 +50,188 @@ export function buildMetricsUrl(params: MetricsUrlParams): string {
     aggregate,
     q,
     operations,
+    useProxy = false,
   } = params;
 
-  const url = new URL(`/api/mu/v0/ns/apx.online/metric-sets/${metricSet}:${method}`, window.location.origin);
-  url.searchParams.set('fromTimestamp', fromTimestamp);
-  url.searchParams.set('toTimestamp', toTimestamp);
-
-  if (method === 'listAggregations') {
-    url.searchParams.set('propertiesSize', String(propertiesSize));
+  if (!fromTimestamp) {
+    throw new Error("fromTimestamp es requerido");
   }
 
-  if (granularity && method === 'listTimeseries') {
-    url.searchParams.set('granularity', granularity);
+  if (!toTimestamp) {
+    throw new Error("toTimestamp es requerido");
   }
 
-  url.searchParams.set('aggregate', `"${aggregate}"`);
-  url.searchParams.set('q', q);
+  if (!aggregate?.trim()) {
+    throw new Error("aggregate es requerido");
+  }
 
-  operations.forEach((op) => {
-    url.searchParams.append('operation', op);
-  });
+  if (!q?.trim()) {
+    throw new Error("q es requerido");
+  }
+
+  if (!operations?.length) {
+    throw new Error("Debe existir al menos una operation");
+  }
+
+  const base = useProxy ? MU_PROXY_BASE : MU_REAL_BASE;
+
+  const url = new URL(
+    `${base}/v0/ns/apx.online/metric-sets/${metricSet}:${method}`
+  );
+
+  url.searchParams.set("fromTimestamp", String(fromTimestamp));
+  url.searchParams.set("toTimestamp", String(toTimestamp));
+
+  if (method === "listAggregations") {
+    url.searchParams.set("propertiesSize", String(propertiesSize));
+  }
+
+  if (method === "listTimeseries") {
+    if (!granularity?.trim()) {
+      throw new Error("granularity es requerida para listTimeseries");
+    }
+    url.searchParams.set("granularity", granularity);
+  }
+
+  url.searchParams.set("aggregate", ensureQuoted(aggregate));
+  url.searchParams.set("q", q.trim());
+
+  for (const op of operations) {
+    if (op?.trim()) {
+      url.searchParams.append("operation", op.trim());
+    }
+  }
 
   return url.toString();
 }
 
-// ---- Query builders ----
-export function buildSiteFilter(site: string): string {
-  return `"site" == "${site}"`;
+// ============================================================
+// Query builders
+// ============================================================
+
+export function buildEqFilter(field: string, value: string): string {
+  return `${ensureQuoted(field)} == ${ensureQuoted(escapeQueryValue(value))}`;
 }
 
-export function buildInvokerTxFilter(invokerTx: string): string {
-  return `"invokerTx" == "${invokerTx}"`;
+export function buildSiteFilter(site: string, field = "site"): string {
+  return buildEqFilter(field, site);
 }
 
-export function buildUtilityTypeFilter(utilityType: string): string {
-  return `"utilitytype" == "${utilityType}"`;
+export function buildInvokerTxFilter(
+  invokerTx: string,
+  field = "invokerTx"
+): string {
+  return buildEqFilter(field, invokerTx);
 }
 
-export function buildCompoundQuery(...parts: (string | undefined)[]): string {
-  return parts.filter(Boolean).join(' AND ');
+export function buildUtilityTypeFilter(
+  utilityType: string,
+  field = "utilitytype"
+): string {
+  return buildEqFilter(field, utilityType);
+}
+
+export function buildStartsWithFilter(field: string, value: string): string {
+  return `${ensureQuoted(field)} == ${ensureQuoted(
+    `${escapeQueryValue(value)}*`
+  )}`;
+}
+
+export function buildCompoundQuery(
+  ...parts: Array<string | undefined | null>
+): string {
+  const clean = parts
+    .map((part) => part?.trim())
+    .filter((part): part is string => Boolean(part));
+
+  return clean.join(" AND ");
+}
+
+export function wrapQuery(query: string): string {
+  const clean = query.trim();
+  if (!clean) return clean;
+  if (clean.startsWith("(") && clean.endsWith(")")) {
+    return clean;
+  }
+  return `(${clean})`;
+}
+
+export function buildOrQuery(field: string, values: string[]): string {
+  const cleanValues = values
+    .map((v) => v?.trim())
+    .filter((v): v is string => Boolean(v));
+
+  if (!cleanValues.length) {
+    throw new Error(`No hay valores para construir OR en ${field}`);
+  }
+
+  return wrapQuery(
+    cleanValues.map((v) => buildEqFilter(field, v)).join(" OR ")
+  );
 }
 
 export function buildUtilityTypeOrQuery(types: string[]): string {
-  return `(${types.map((t) => `utilitytype="${t}"`).join(' or ')})`;
+  return buildOrQuery("utilitytype", types);
 }
 
-// ---- RHO URL builder ----
-export function buildRhoSpansUrl(params: {
+// ============================================================
+// RHO URL builder
+// ============================================================
+
+export interface RhoSpansUrlParams {
   invokerTx: string;
   site: string;
   fromTimestamp: NanoTimestamp;
   toTimestamp: NanoTimestamp;
-}): string {
-  const { invokerTx, site, fromTimestamp, toTimestamp } = params;
-  const q = `name == "**" and properties.invokerTx == "${invokerTx}*" and properties.site == "${site}"`;
-  const url = new URL('/api/rho/v1/ns/apx.online/spans', window.location.origin);
-  url.searchParams.set('q', q);
-  url.searchParams.set('sort', 'ascending');
-  url.searchParams.set('fromDate', fromTimestamp);
-  url.searchParams.set('toDate', toTimestamp);
-  url.searchParams.set('properties', 'channel-code,environ-code,env,product-code,returncode');
-  url.searchParams.set('profile', 'default');
+  useProxy?: boolean; // false = real BBVA endpoint
+  sort?: "ascending" | "descending";
+  profile?: string;
+  properties?: string[];
+}
+
+export function buildRhoSpansUrl(params: RhoSpansUrlParams): string {
+  const {
+    invokerTx,
+    site,
+    fromTimestamp,
+    toTimestamp,
+    useProxy = false,
+    sort = "ascending",
+    profile = "default",
+    properties = ["channel-code", "environ-code", "env", "product-code", "returncode"],
+  } = params;
+
+  if (!invokerTx?.trim()) {
+    throw new Error("invokerTx es requerido");
+  }
+
+  if (!site?.trim()) {
+    throw new Error("site es requerido");
+  }
+
+  if (!fromTimestamp) {
+    throw new Error("fromTimestamp es requerido");
+  }
+
+  if (!toTimestamp) {
+    throw new Error("toTimestamp es requerido");
+  }
+
+  const q = buildCompoundQuery(
+    buildEqFilter("name", "**"),
+    buildStartsWithFilter("properties.invokerTx", invokerTx),
+    buildEqFilter("properties.site", site)
+  );
+
+  const base = useProxy ? RHO_PROXY_BASE : RHO_REAL_BASE;
+
+  const url = new URL(`${base}/v1/ns/apx.online/spans`);
+  url.searchParams.set("q", q);
+  url.searchParams.set("sort", sort);
+  url.searchParams.set("fromDate", String(fromTimestamp));
+  url.searchParams.set("toDate", String(toTimestamp));
+  url.searchParams.set("properties", properties.join(","));
+  url.searchParams.set("profile", profile);
+
   return url.toString();
 }

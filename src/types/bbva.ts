@@ -5,6 +5,9 @@
 // ---- Date helpers ----
 export type NanoTimestamp = string;
 
+// ---- Search mode ----
+export type SearchMode = "pipeline" | "utility" | "rho";
+
 // ---- Filter / Query types ----
 export interface MetricsFilters {
   fromDate: Date;
@@ -15,32 +18,36 @@ export interface MetricsFilters {
   invokerLibrary?: string;
   limit?: number;
   bearerToken?: string;
+
+  // Extensiones para frontend
+  searchMode?: SearchMode;
+  iterateAllInvokerTx?: boolean;
 }
 
 export type AggregateField =
-  | 'name'
-  | 'invokerTx'
-  | 'utilitytype'
-  | 'invokerLibrary'
-  | 'invokedparam'
-  | 'typology'
-  | 'invokedHostTx'
-  | 'databaseInstance'
-  | 'site'
-  | 'env';
+  | "name"
+  | "invokerTx"
+  | "utilitytype"
+  | "invokerLibrary"
+  | "invokedparam"
+  | "typology"
+  | "invokedHostTx"
+  | "databaseInstance"
+  | "site"
+  | "env";
 
 export type OperationType =
-  | 'sum:num_executions'
-  | 'mean:span_duration'
-  | 'sum:technical_error'
-  | 'sum:functional_error'
-  | 'count:utility_count'
-  | 'min:utility_duration'
-  | 'mean:utility_duration'
-  | 'max:utility_duration';
+  | "sum:num_executions"
+  | "mean:span_duration"
+  | "sum:technical_error"
+  | "sum:functional_error"
+  | "count:utility_count"
+  | "min:utility_duration"
+  | "mean:utility_duration"
+  | "max:utility_duration";
 
-export type MetricSetName = 'functional-dashboard' | 'utility-metric-set';
-export type MetricMethod = 'listAggregations' | 'listTimeseries';
+export type MetricSetName = "functional-dashboard" | "utility-metric-set";
+export type MetricMethod = "listAggregations" | "listTimeseries";
 
 // ---- API Response types ----
 export interface AggregationBucket {
@@ -61,6 +68,26 @@ export interface TimeseriesPoint {
 export interface TimeseriesResponse {
   data?: TimeseriesPoint[];
   timeseries?: TimeseriesPoint[];
+}
+
+// ---- MU response for invokerTx aggregation ----
+export interface MuInvokerTxBucket {
+  bucket?: {
+    invokerTx?: string;
+    [key: string]: string | undefined;
+  };
+  values?: {
+    count_utility_count?: number;
+    [key: string]: number | undefined;
+  };
+}
+
+export type MuInvokerTxResponse = MuInvokerTxBucket[] | AggregationResponse;
+
+// ---- InvokerTx aggregated row ----
+export interface InvokerTxMetricRow {
+  invokerTx: string;
+  utilityCount: number;
 }
 
 // ---- Span / Trace types ----
@@ -97,14 +124,14 @@ export interface NormalizedSpan {
 
 // ---- Utility types ----
 export const UTILITY_TYPES = [
-  'InterBackendCics',
-  'APIInternalConnectorImpl',
-  'Jdbc',
-  'DaasMongoConnector',
-  'APIExternalConnectorImpl',
-  'TitanClient',
-  'GRPCClient',
-  'Jpa',
+  "InterBackendCics",
+  "APIInternalConnectorImpl",
+  "Jdbc",
+  "DaasMongoConnector",
+  "APIExternalConnectorImpl",
+  "TitanClient",
+  "GRPCClient",
+  "Jpa",
 ] as const;
 
 export type UtilityType = (typeof UTILITY_TYPES)[number];
@@ -120,6 +147,22 @@ export interface MetricRow {
   min_utility_duration: number;
   mean_utility_duration: number;
   max_utility_duration: number;
+}
+
+// ---- Pipeline row for rendered table ----
+export interface PipelineRow {
+  invokerTx: string;
+  utilityCount: number;
+
+  interBackendCicsCount: number;
+  apiInternalConnectorCount: number;
+  jdbcCount: number;
+  daasMongoConnectorCount: number;
+  otherCount: number;
+
+  totalSpans: number;
+  totalDurationMs: number;
+  avgDurationMs: number;
 }
 
 // ---- KPI summary ----
