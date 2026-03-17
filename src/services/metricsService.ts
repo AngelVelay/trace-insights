@@ -1,7 +1,3 @@
-// ============================================================
-// MU Metrics Service
-// technical-dashboard (name) + utility-metric-set + trace
-// ============================================================
 import type {
   AggregationBucket,
   AggregationResponse,
@@ -81,7 +77,10 @@ async function fetchAggregation(
 export async function fetchInvokerTxBuckets(
   filters: MetricsFilters
 ): Promise<InvokerTxBucket[]> {
-  const q = filters.site ? buildSiteFilter(filters.site) : "";
+  const q = buildCompoundQuery(
+    filters.site ? buildSiteFilter(filters.site) : undefined,
+    filters.invokerTx ? `("name" == "${filters.invokerTx.trim()}")` : undefined
+  );
 
   return (await fetchAggregation(
     filters,
@@ -123,7 +122,8 @@ export async function fetchUtilityTypeBuckets(
   const q = buildCompoundQuery(
     filters.site ? buildSiteFilter(filters.site) : undefined,
     buildInvokerTxFilter(invokerTx),
-    buildInvokerLibraryFilter(invokerLibrary)
+    buildInvokerLibraryFilter(invokerLibrary),
+    filters.utilityType ? buildUtilityTypeFilter(filters.utilityType) : undefined
   );
 
   return fetchAggregation(
@@ -142,6 +142,7 @@ export async function fetchInvokedParamBuckets(
   utilitytype: string
 ): Promise<AggregationBucket[]> {
   const q = buildCompoundQuery(
+    filters.site ? buildSiteFilter(filters.site) : undefined,
     buildInvokerTxFilter(invokerTx),
     buildInvokerLibraryFilter(invokerLibrary),
     buildUtilityTypeFilter(utilitytype)
@@ -203,7 +204,13 @@ export async function fetchFullMetrics(
 
   let finalTxMetaRows = uniqueTxMetaRows;
 
-  if (baseFilters.limit && baseFilters.limit > 0) {
+  if (baseFilters.invokerTx?.trim()) {
+    finalTxMetaRows = finalTxMetaRows.filter(
+      (row) => row.meta.invokerTx === baseFilters.invokerTx?.trim()
+    );
+  }
+
+  if (!baseFilters.iterateAllInvokerTx && baseFilters.limit && baseFilters.limit > 0) {
     finalTxMetaRows = finalTxMetaRows.slice(0, baseFilters.limit);
   }
 
@@ -247,13 +254,19 @@ export async function fetchFullMetrics(
         library.invokerLibrary
       );
 
-      const utilityTypes = utilityTypeBuckets
+      let utilityTypes = utilityTypeBuckets
         .map((ub) => ({
           invokerLibrary: library.invokerLibrary,
           utilitytype: ub.bucket?.utilitytype ?? ub.bucket?.name ?? "",
           count: Number(ub.values?.count_utility_count ?? 0),
         }))
         .filter((x) => x.utilitytype.trim().length > 0);
+
+      if (baseFilters.utilityType) {
+        utilityTypes = utilityTypes.filter(
+          (item) => item.utilitytype === baseFilters.utilityType
+        );
+      }
 
       utilityTypeBlocks.push(...utilityTypes);
 

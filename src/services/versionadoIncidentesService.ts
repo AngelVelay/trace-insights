@@ -19,6 +19,7 @@ interface AggregationBucket {
   };
   values?: {
     sum_num_executions?: number;
+    sum_technical_error?: number;
   };
 }
 
@@ -567,6 +568,8 @@ function buildTopTrxUrl(params: {
   url.searchParams.set("propertiesSize", "20000");
   url.searchParams.set("aggregate", '"name"');
   url.searchParams.set("q", `${config.qEnv} AND "returncode" == "12"`);
+
+  url.searchParams.append("operation", "sum:technical_error");
   url.searchParams.append("operation", "sum:num_executions");
 
   return url.toString();
@@ -886,11 +889,20 @@ async function fetchTopTrx(
   const res = await apiRequest<AggregationResponse>(url, { headers });
   const buckets = Array.isArray(res.buckets) ? res.buckets : [];
 
-  const sorted = [...buckets].sort(
-    (a, b) =>
+  const sorted = [...buckets].sort((a, b) => {
+    const errorsDiff =
+      Number(b.values?.sum_technical_error ?? 0) -
+      Number(a.values?.sum_technical_error ?? 0);
+
+    if (errorsDiff !== 0) {
+      return errorsDiff;
+    }
+
+    return (
       Number(b.values?.sum_num_executions ?? 0) -
       Number(a.values?.sum_num_executions ?? 0)
-  );
+    );
+  });
 
   return sorted[0]?.bucket?.name ?? "";
 }
@@ -991,11 +1003,15 @@ async function fetchDescriptionFromLogs(params: {
   };
 }
 
+function cloneDate(date: Date): Date {
+  return new Date(date.getTime());
+}
+
 function buildDailyDates(
   installationDay: Date,
   mode: InstallationRangeMode
 ): Array<{ date: Date; phase: IncidentPhase }> {
-  const base = startOfDay(installationDay);
+  const base = cloneDate(installationDay);
   const dates: Array<{ date: Date; phase: IncidentPhase }> = [];
 
   if (mode === "before") {
@@ -1034,34 +1050,41 @@ export async function fetchIncidentMonitoring(params: {
 }): Promise<IncidentMonitoringResult> {
   const { environment, installationDay, mode, bearerToken, openAiApiKey } = params;
 
-  const trx = await fetchTopTrx(
-    environment,
-    startOfDay(installationDay),
-    endOfDay(installationDay),
-    bearerToken
-  );
-
-  if (!trx) {
-    return {
-      environment,
-      mode,
-      installationDay: format(installationDay, "dd/MM/yyyy"),
-      trx: "",
-      rows: [],
-      totals: {
-        numeroEjecuciones: 0,
-        numeroErrores: 0,
-        numeroTiempoRespuestaMs: 0,
-      },
-    };
-  }
-
   const dailyDates = buildDailyDates(installationDay, mode);
 
   const rows = await Promise.all(
-    dailyDates.map(async ({ date, phase }, index, arr) => {
-      const fromDate = startOfDay(date);
-      const toDate = endOfDay(date);
+    dailyDates.map(async ({ date, phase }, index) => {
+      const fromDate = new Date(date);
+const toDate = new Date(date);
+toDate.setDate(toDate.getDate() + 1);
+toDate.setMilliseconds(toDate.getMilliseconds() - 1);
+
+      const trx = await fetchTopTrx(
+        environment,
+        fromDate,
+        toDate,
+        bearerToken
+      );
+
+      if (!trx) {
+        return {
+          phase,
+          date: format(date, "dd/MM/yyyy HH:mm"),
+          trx: "",
+          exception: "",
+          description: "",
+          resumenIA: "",
+          detalleErroresControlados: "",
+          codigoErrorControlado: "",
+          apxChannel: "",
+          fechaRevision: format(new Date(), "dd/MM/yyyy HH:mm"),
+          numeroEjecuciones: 0,
+          numeroErrores: 0,
+          numeroTiempoRespuestaMs: 0,
+          tuvoMayorNumeroEjecuciones: "No",
+          aumentoPromedioTiempoRespuesta: "No",
+        };
+      }
 
       const [
         numeroErrores,
@@ -1105,7 +1128,6 @@ export async function fetchIncidentMonitoring(params: {
         }),
       ]);
 
-      const previousRowDate = index > 0 ? arr[index - 1]?.date : null;
       const descriptionReduced = summarizeDescription(descriptionInfo.description);
       const resumenIA = await summarizeDescriptionWithAIFrontend(
         descriptionInfo.description,
@@ -1117,41 +1139,55 @@ export async function fetchIncidentMonitoring(params: {
         extractExceptionName(descriptionInfo.detalleErroresControlados) ||
         descriptionInfo.exception;
 
-      const controlledErrorResolved = extractControlledErrorCode(
+      const controlledErrorCode = extractControlledErrorCode(
         descriptionInfo.detalleErroresControlados
       );
 
-      const controlledErrorCode = extractControlledErrorCode(
-  descriptionInfo.detalleErroresControlados
-);
+      const controlledErrorDetail = extractControlledErrorDetail(
+        descriptionInfo.detalleErroresControlados
+      );
 
-const controlledErrorDetail = extractControlledErrorDetail(
-  descriptionInfo.detalleErroresControlados
-);
-
-return {
-  phase,
-  date: format(date, "dd/MM/yyyy"),
-  trx,
-  exception: exceptionName,
-  description: descriptionReduced,
-  resumenIA,
-  detalleErroresControlados: controlledErrorDetail,
-  codigoErrorControlado: controlledErrorCode,
-  apxChannel: descriptionInfo.apxChannel,
-  fechaRevision: format(date, "dd/MM/yyyy"),
-  numeroEjecuciones,
-  numeroErrores,
-  numeroTiempoRespuestaMs,
-  tuvoMayorNumeroEjecuciones:
-    previousRowDate && numeroEjecuciones > 0 ? "Sí" : "N/A",
-  aumentoPromedioTiempoRespuesta:
-    previousRowDate && numeroTiempoRespuestaMs > 0 ? "Sí" : "N/A",
-};
+      return {
+        phase,
+        date: format(date, "dd/MM/yyyy"),
+        trx,
+        exception: exceptionName,
+        description: descriptionReduced,
+        resumenIA,
+        detalleErroresControlados: controlledErrorDetail,
+        codigoErrorControlado: controlledErrorCode,
+        apxChannel: descriptionInfo.apxChannel,
+        fechaRevision: format(new Date(), "dd/MM/yyyy HH:mm"),
+        numeroEjecuciones,
+        numeroErrores,
+        numeroTiempoRespuestaMs,
+        tuvoMayorNumeroEjecuciones: "No",
+        aumentoPromedioTiempoRespuesta: "No",
+      };
     })
   );
 
-  const totals = rows.reduce(
+  const rowsWithComparisons = rows.map((row, index) => {
+    if (index === 0) {
+      return {
+        ...row,
+        tuvoMayorNumeroEjecuciones: "No",
+        aumentoPromedioTiempoRespuesta: "No",
+      };
+    }
+
+    const previousRow = rows[index - 1];
+
+    return {
+      ...row,
+      tuvoMayorNumeroEjecuciones:
+        row.numeroEjecuciones > previousRow.numeroEjecuciones ? "Sí" : "No",
+      aumentoPromedioTiempoRespuesta:
+        row.numeroTiempoRespuestaMs > previousRow.numeroTiempoRespuestaMs ? "Sí" : "No",
+    };
+  });
+
+  const totals = rowsWithComparisons.reduce(
     (acc, row) => {
       acc.numeroEjecuciones += row.numeroEjecuciones;
       acc.numeroErrores += row.numeroErrores;
@@ -1169,8 +1205,12 @@ return {
     environment,
     mode,
     installationDay: format(installationDay, "dd/MM/yyyy"),
-    trx,
-    rows,
+    trx:
+      rowsWithComparisons.length > 0 &&
+      new Set(rowsWithComparisons.map((row) => row.trx).filter(Boolean)).size > 1
+        ? "Múltiples TRX por día"
+        : rowsWithComparisons.find((row) => row.trx)?.trx ?? "",
+    rows: rowsWithComparisons,
     totals,
   };
 }

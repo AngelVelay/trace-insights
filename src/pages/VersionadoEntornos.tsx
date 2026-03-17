@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import LoadingOverlay from "@/components/LoadingOverlay";
 import { useBearerToken } from "@/hooks/useBearerToken";
+import DateTimePicker from "@/components/DateTimePicker";
 import {
   Eye,
   EyeOff,
@@ -583,30 +584,30 @@ export default function VersionadoEntornos() {
 
             <div className="space-y-1.5">
               <Label className="text-xs text-muted-foreground">Día de instalación</Label>
-              <Popover>
-                <PopoverTrigger asChild>
-                  <Button
-                    variant="outline"
-                    className={cn(
-                      "w-full justify-start font-mono text-xs",
-                      !installationDay && "text-muted-foreground"
-                    )}
-                  >
-                    <CalendarIcon className="mr-2 h-4 w-4" />
-                    {installationDay
-                      ? format(installationDay, "dd/MM/yyyy")
-                      : "Selecciona fecha"}
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent className="w-auto p-0" align="start">
-                  <Calendar
-                    mode="single"
-                    selected={installationDay}
-                    onSelect={(d) => d && setInstallationDay(d)}
-                    initialFocus
-                  />
-                </PopoverContent>
-              </Popover>
+          <Popover>
+  <PopoverTrigger asChild>
+    <Button
+      variant="outline"
+      className={cn(
+        "w-full justify-start font-mono text-xs",
+        !installationDay && "text-muted-foreground"
+      )}
+    >
+      <CalendarIcon className="mr-2 h-4 w-4" />
+      {installationDay
+        ? format(installationDay, "dd/MM/yyyy")
+        : "Selecciona fecha"}
+    </Button>
+  </PopoverTrigger>
+  <PopoverContent className="w-auto p-0" align="start">
+    <Calendar
+      mode="single"
+      selected={installationDay}
+      onSelect={(d) => d && setInstallationDay(d)}
+      initialFocus
+    />
+  </PopoverContent>
+</Popover>
             </div>
 
             <div className="space-y-1.5">

@@ -182,11 +182,15 @@ export async function fetchEnvironmentMonitoringSummary(
   };
 }
 
+function cloneDate(date: Date): Date {
+  return new Date(date.getTime());
+}
+
 function buildDailyDates(
   installationDay: Date,
   mode: InstallationRangeMode
 ): Array<{ date: Date; label: string; phase: EnvironmentPhase; offset: number }> {
-  const base = startOfDay(installationDay);
+  const base = cloneDate(installationDay);
   const dates: Array<{
     date: Date;
     label: string;
@@ -199,7 +203,7 @@ function buildDailyDates(
       const date = subDays(base, i);
       dates.push({
         date,
-        label: format(date, "dd/MM/yyyy"),
+        label: format(date, "dd/MM/yyyy HH:mm"),
         phase: "before",
         offset: -i,
       });
@@ -212,7 +216,7 @@ function buildDailyDates(
       const date = addDays(base, i);
       dates.push({
         date,
-        label: format(date, "dd/MM/yyyy"),
+        label: format(date, "dd/MM/yyyy HH:mm"),
         phase: "after",
         offset: i,
       });
@@ -224,7 +228,7 @@ function buildDailyDates(
     const date = subDays(base, i);
     dates.push({
       date,
-      label: format(date, "dd/MM/yyyy"),
+      label: format(date, "dd/MM/yyyy HH:mm"),
       phase: "before",
       offset: -i,
     });
@@ -232,7 +236,7 @@ function buildDailyDates(
 
   dates.push({
     date: base,
-    label: format(base, "dd/MM/yyyy"),
+    label: format(base, "dd/MM/yyyy HH:mm"),
     phase: "installation",
     offset: 0,
   });
@@ -241,7 +245,7 @@ function buildDailyDates(
     const date = addDays(base, i);
     dates.push({
       date,
-      label: format(date, "dd/MM/yyyy"),
+      label: format(date, "dd/MM/yyyy HH:mm"),
       phase: "after",
       offset: i,
     });
@@ -257,8 +261,10 @@ export async function fetchEnvironmentMonitoringDaily(
 
   const rows = await Promise.all(
     days.map(async ({ date, label, phase, offset }) => {
-      const fromDate = startOfDay(date);
-      const toDate = endOfDay(date);
+      const fromDate = new Date(date);
+const toDate = new Date(date);
+toDate.setDate(toDate.getDate() + 1);
+toDate.setMilliseconds(toDate.getMilliseconds() - 1);
 
       const summary = await fetchEnvironmentMonitoringSummary({
         environment: filters.environment,
@@ -268,7 +274,7 @@ export async function fetchEnvironmentMonitoringDaily(
       });
 
       return {
-        date: format(date, "dd/MM/yyyy"),
+        date: format(date, "dd/MM/yyyy HH:mm"),
         label,
         phase,
         offset,

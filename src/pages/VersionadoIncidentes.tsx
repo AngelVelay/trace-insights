@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useBearerToken } from "@/hooks/useBearerToken";
+import DateTimePicker from "@/components/DateTimePicker";
 import {
   Eye,
   EyeOff,
@@ -501,30 +502,30 @@ const currentPage = location.pathname.startsWith("/versionado/incidentes")
               <Label className="text-xs font-medium text-muted-foreground">
                 Día de instalación
               </Label>
-              <Popover>
-                <PopoverTrigger asChild>
-                  <Button
-                    variant="outline"
-                    className={cn(
-                      "h-11 w-full justify-start rounded-xl font-mono text-xs",
-                      !installationDay && "text-muted-foreground"
-                    )}
-                  >
-                    <CalendarIcon className="mr-2 h-4 w-4" />
-                    {installationDay
-                      ? format(installationDay, "dd/MM/yyyy")
-                      : "Selecciona fecha"}
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent className="w-auto rounded-xl p-0" align="start">
-                  <Calendar
-                    mode="single"
-                    selected={installationDay}
-                    onSelect={(d) => d && setInstallationDay(d)}
-                    initialFocus
-                  />
-                </PopoverContent>
-              </Popover>
+            <Popover>
+  <PopoverTrigger asChild>
+    <Button
+      variant="outline"
+      className={cn(
+        "h-11 w-full justify-start rounded-xl font-mono text-xs",
+        !installationDay && "text-muted-foreground"
+      )}
+    >
+      <CalendarIcon className="mr-2 h-4 w-4" />
+      {installationDay
+        ? format(installationDay, "dd/MM/yyyy")
+        : "Selecciona fecha"}
+    </Button>
+  </PopoverTrigger>
+  <PopoverContent className="w-auto rounded-xl p-0" align="start">
+    <Calendar
+      mode="single"
+      selected={installationDay}
+      onSelect={(d) => d && setInstallationDay(d)}
+      initialFocus
+    />
+  </PopoverContent>
+</Popover>
             </div>
 
             <div className="space-y-2">
