@@ -1,23 +1,11 @@
-// ============================================================
-// BBVA Metrics & Traces - Type Definitions
-// ============================================================
-
 export type NanoTimestamp = string;
 
-export type SearchMode = "pipeline" | "utility" | "rho";
-
-export interface MetricsFilters {
-  fromDate: Date;
-  toDate: Date;
-  site?: string;
-  invokerTx?: string;
-  utilityType?: string;
-  invokerLibrary?: string;
-  limit?: number;
-  bearerToken?: string;
-  searchMode?: SearchMode;
-  iterateAllInvokerTx?: boolean;
-}
+export type SearchMode =
+  | "pipeline"
+  | "utility"
+  | "rho"
+  | "versioning-env"
+  | "versioning-incidents";
 
 export type AggregateField =
   | "name"
@@ -41,7 +29,11 @@ export type OperationType =
   | "mean:utility_duration"
   | "max:utility_duration";
 
-export type MetricSetName = "functional-dashboard" | "utility-metric-set";
+export type MetricSetName =
+  | "functional-dashboard"
+  | "utility-metric-set"
+  | "technical-dashboard";
+
 export type MetricMethod = "listAggregations" | "listTimeseries";
 
 export interface AggregationBucket {
@@ -50,6 +42,7 @@ export interface AggregationBucket {
 }
 
 export interface AggregationResponse {
+  buckets?: AggregationBucket[];
   data?: AggregationBucket[];
   aggregations?: AggregationBucket[];
 }
@@ -73,6 +66,8 @@ export interface RawSpan {
   endTime?: string | number;
   startDate?: number;
   finishDate?: number;
+  recordDate?: number;
+  parentSpan?: string;
   properties?: Record<string, string>;
   children?: RawSpan[];
 }
@@ -116,6 +111,7 @@ export interface MetricRow {
   invokerLibrary: string;
   utilitytype: string;
   invokedparam: string;
+  trace: string;
   utility_count: number;
   min_utility_duration: number;
   mean_utility_duration: number;
@@ -129,6 +125,10 @@ export interface KPISummary {
   totalJumps: number;
   totalDurationMs: number;
   avgDurationMs: number;
+  traceApiConnectors: number;
+  traceCics: number;
+  traceJdbc: number;
+  traceMongo: number;
 }
 
 export interface ClassifiedTraces {
@@ -143,4 +143,17 @@ export interface ApiConfig {
   baseUrl: string;
   timeout: number;
   maxRetries: number;
+}
+
+export interface MetricsFilters {
+  fromDate: Date;
+  toDate: Date;
+  site?: string;
+  invokerTx?: string;
+  utilityType?: string;
+  invokerLibrary?: string;
+  limit?: number;
+  bearerToken?: string;
+  searchMode?: SearchMode;
+  iterateAllInvokerTx?: boolean;
 }

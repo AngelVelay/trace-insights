@@ -1,4 +1,6 @@
 import { useCallback, useState } from "react";
+import LoadingOverlay from "@/components/LoadingOverlay";
+import { useBearerToken } from "@/hooks/useBearerToken";
 import type {
   MetricsFilters,
   MetricRow,
@@ -18,10 +20,54 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
 
 function computeKPIs(rows: MetricRow[], spans: NormalizedSpan[]): KPISummary {
-  const invokerTxs = new Set(rows.map((r) => r.invokerTx));
-  const utypes = new Set(rows.map((r) => r.utilitytype));
-  const params = new Set(rows.map((r) => r.invokedparam));
+  const invokerTxs = new Set(
+    rows.map((r) => {
+      try {
+        const parsed = JSON.parse(String(r.invokerTx));
+        return parsed?.invokerTx ?? String(r.invokerTx);
+      } catch {
+        return String(r.invokerTx);
+      }
+    })
+  );
+
+  const utypes = new Set<string>();
+  const params = new Set<string>();
+
+  for (const row of rows) {
+    try {
+      const utilityItems = JSON.parse(String(row.utilitytype));
+      if (Array.isArray(utilityItems)) {
+        utilityItems.forEach((item) => {
+          if (item?.utilitytype) utypes.add(String(item.utilitytype));
+        });
+      } else if (row.utilitytype && row.utilitytype !== "-") {
+        utypes.add(String(row.utilitytype));
+      }
+    } catch {
+      if (row.utilitytype && row.utilitytype !== "-") {
+        utypes.add(String(row.utilitytype));
+      }
+    }
+
+    try {
+      const invokedItems = JSON.parse(String(row.invokedparam));
+      if (Array.isArray(invokedItems)) {
+        invokedItems.forEach((item) => {
+          if (item?.invokedparam) params.add(String(item.invokedparam));
+        });
+      } else if (row.invokedparam && row.invokedparam !== "-") {
+        params.add(String(row.invokedparam));
+      }
+    } catch {
+      if (row.invokedparam && row.invokedparam !== "-") {
+        params.add(String(row.invokedparam));
+      }
+    }
+  }
+
   const totalDur = spans.reduce((s, sp) => s + sp.durationMs, 0);
+  const classified = classifySpans(spans);
 
   return {
     totalInvokerTx: invokerTxs.size,
@@ -30,6 +76,10 @@ function computeKPIs(rows: MetricRow[], spans: NormalizedSpan[]): KPISummary {
     totalJumps: spans.length,
     totalDurationMs: totalDur,
     avgDurationMs: spans.length > 0 ? totalDur / spans.length : 0,
+    traceApiConnectors: classified.APIInternalConnectorImpl.length,
+    traceCics: classified.InterBackendCics.length,
+    traceJdbc: classified.Jdbc.length,
+    traceMongo: classified.DaasMongoConnector.length,
   };
 }
 
@@ -40,6 +90,7 @@ export default function Dashboard() {
   const [spans, setSpans] = useState<NormalizedSpan[]>([]);
   const [classified, setClassified] = useState<ClassifiedTraces | null>(null);
   const [metricsError, setMetricsError] = useState<string | null>(null);
+  const { bearerToken, setBearerToken } = useBearerToken();
 
   const [kpis, setKpis] = useState<KPISummary>({
     totalInvokerTx: 0,
@@ -48,6 +99,10 @@ export default function Dashboard() {
     totalJumps: 0,
     totalDurationMs: 0,
     avgDurationMs: 0,
+    traceApiConnectors: 0,
+    traceCics: 0,
+    traceJdbc: 0,
+    traceMongo: 0,
   });
 
   const handleSearch = useCallback(async (filters: MetricsFilters) => {
@@ -60,7 +115,6 @@ export default function Dashboard() {
 
     try {
       const metricRows = await fetchFullMetrics(filters, setProgress);
-      console.debug("[Dashboard] metricRows =", metricRows);
       setRows(metricRows);
 
       let allSpans: NormalizedSpan[] = [];
@@ -92,36 +146,21 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen gradient-mesh">
-      <header className="border-b border-border bg-card/80 backdrop-blur-sm sticky top-0 z-50">
-        <div className="container py-3 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="h-8 w-8 rounded-md bg-primary flex items-center justify-center">
-              <span className="text-primary-foreground font-bold text-sm">B</span>
-            </div>
-            <div>
-              <h1 className="text-sm font-bold tracking-tight">BBVA Observability</h1>
-              <p className="text-xs text-muted-foreground">Métricas & Trazas Dashboard</p>
-            </div>
-          </div>
-
-          <ExportButtons rows={rows} classified={classified} allSpans={spans} />
-        </div>
-      </header>
-
-      <main className="container py-6 space-y-6">
+<LoadingOverlay show={loading} />
+      <main className="container space-y-6 py-6">
         <FilterPanel onSearch={handleSearch} loading={loading} />
 
         {loading && (
-          <div className="rounded-lg border border-primary/30 bg-primary/5 p-4 flex items-center gap-3">
-            <div className="h-3 w-3 rounded-full bg-primary animate-pulse" />
-            <span className="text-sm font-mono text-primary">{progress}</span>
+          <div className="flex items-center gap-3 rounded-lg border border-primary/30 bg-primary/5 p-4">
+            <div className="h-3 w-3 animate-pulse rounded-full bg-primary" />
+            <span className="font-mono text-sm text-primary">{progress}</span>
           </div>
         )}
 
         <KPIDashboard kpis={kpis} />
 
         <Tabs defaultValue="metrics" className="space-y-4">
-          <TabsList className="bg-card border border-border">
+          <TabsList className="border border-border bg-card">
             <TabsTrigger value="charts" className="text-xs">
               Gráficas
             </TabsTrigger>

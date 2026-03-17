@@ -9,13 +9,8 @@ import type {
   OperationType,
 } from "@/types/bbva";
 
-const DEFAULT_MU_BASE =
-  import.meta.env.VITE_MU_BASE_URL ||
-  "https://mu.live-02.nextgen.igrupobbva";
-
-const DEFAULT_RHO_BASE =
-  import.meta.env.VITE_RHO_BASE_URL ||
-  "https://rho.live-02.nextgen.igrupobbva";
+const DEFAULT_MU_BASE = "https://mu.live-02.nextgen.igrupobbva";
+const DEFAULT_RHO_BASE = "https://rho.live-02.nextgen.igrupobbva";
 
 function ensureQuoted(value: string): string {
   const trimmed = value.trim();
@@ -31,15 +26,15 @@ function clean(value: string): string {
 // Query builders
 // -------------------------
 export function buildSiteFilter(site: string): string {
-  return `"site" == "${clean(site)}"`;
+  return `("site" == "${clean(site)}")`;
 }
 
 export function buildInvokerTxFilter(invokerTx: string): string {
-  return `"invokerTx" == "${clean(invokerTx)}"`;
+  return `("invokerTx" == "${clean(invokerTx)}")`;
 }
 
 export function buildInvokerLibraryFilter(invokerLibrary: string): string {
-  return `"invokerLibrary" == "${clean(invokerLibrary)}"`;
+  return `("invokerLibrary" == "${clean(invokerLibrary)}")`;
 }
 
 export function buildUtilityTypeFilter(utilityType: string): string {
@@ -48,6 +43,7 @@ export function buildUtilityTypeFilter(utilityType: string): string {
 
 export function buildUtilityTypeOrQuery(types: string[]): string {
   const valid = types.map(clean).filter(Boolean);
+  if (!valid.length) return "";
   return `(${valid.map((t) => `utilitytype="${t}"`).join(" or ")})`;
 }
 
@@ -61,15 +57,17 @@ export function buildCompoundQuery(
 }
 
 export function buildInvokedParamQuery(params: {
+  site?: string;
   invokerTx: string;
   invokerLibrary: string;
   utilityTypes: string[];
 }): string {
-  const left = `("invokerTx" == "${clean(params.invokerTx)}" AND "invokerLibrary" == "${clean(
-    params.invokerLibrary
-  )}")`;
-  const right = buildUtilityTypeOrQuery(params.utilityTypes);
-  return `${left} AND ${right}`;
+  return buildCompoundQuery(
+    params.site ? buildSiteFilter(params.site) : undefined,
+    buildInvokerTxFilter(params.invokerTx),
+    buildInvokerLibraryFilter(params.invokerLibrary),
+    buildUtilityTypeOrQuery(params.utilityTypes)
+  );
 }
 
 // -------------------------
@@ -107,7 +105,10 @@ export function buildMetricsUrl(params: {
   url.searchParams.set("toTimestamp", toTimestamp);
   url.searchParams.set("propertiesSize", String(propertiesSize));
   url.searchParams.set("aggregate", ensureQuoted(aggregate));
-  url.searchParams.set("q", q);
+
+  if (q.trim()) {
+    url.searchParams.set("q", q);
+  }
 
   for (const op of operations) {
     url.searchParams.append("operation", op);
@@ -123,17 +124,24 @@ export function buildRhoSpanSearchUrl(params: {
   invokerTx: string;
   fromDate: NanoTimestamp;
   toDate: NanoTimestamp;
+  site?: string;
   baseUrl?: string;
 }): string {
   const {
     invokerTx,
     fromDate,
     toDate,
+    site,
     baseUrl = DEFAULT_RHO_BASE,
   } = params;
 
+  const q = buildCompoundQuery(
+    site ? buildSiteFilter(site) : undefined,
+    `name == "${clean(invokerTx)}"`
+  );
+
   const url = new URL("/v1/ns/apx.online/spans", baseUrl);
-  url.searchParams.set("q", `name == "${clean(invokerTx)}"`);
+  url.searchParams.set("q", q);
   url.searchParams.set("sort", "ascending");
   url.searchParams.set("fromDate", fromDate);
   url.searchParams.set("toDate", toDate);

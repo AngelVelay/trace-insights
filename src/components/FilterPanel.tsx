@@ -1,12 +1,9 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import {
   CalendarIcon,
   Search,
-  KeyRound,
   Eye,
   EyeOff,
-  Settings2,
-  Layers3,
 } from "lucide-react";
 import { format } from "date-fns";
 
@@ -25,20 +22,18 @@ import { Calendar } from "@/components/ui/calendar";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 
-import { UTILITY_TYPES, type MetricsFilters, type SearchMode } from "@/types/bbva";
+import {
+  UTILITY_TYPES,
+  type MetricsFilters,
+} from "@/types/bbva";
 
 interface FilterPanelProps {
   onSearch: (filters: MetricsFilters) => void;
   loading?: boolean;
 }
 
-const SITES = ["LIVE-01", "LIVE-02", "LIVE-03", "LIVE-04", "LIVE-05"];
-
-const SEARCH_MODES: Array<{ value: SearchMode; label: string }> = [
-  { value: "pipeline", label: "Pipeline completo (todos los invokerTx)" },
-  { value: "utility", label: "Utility metrics" },
-  { value: "rho", label: "RHO trazas" },
-];
+const SITES = ["LIVE-02", "LIVE-04"];
+const BEARER_STORAGE_KEY = "bbva_bearer_token";
 
 function atStartOfDay(date: Date): Date {
   const d = new Date(date);
@@ -52,23 +47,27 @@ function atEndOfDay(date: Date): Date {
   return d;
 }
 
-export default function FilterPanel({ onSearch, loading = false }: FilterPanelProps) {
-  const [searchMode, setSearchMode] = useState<SearchMode>("pipeline");
+export default function FilterPanel({
+  onSearch,
+  loading = false,
+}: FilterPanelProps) {
   const [fromDate, setFromDate] = useState<Date>(new Date());
   const [toDate, setToDate] = useState<Date>(new Date());
   const [site, setSite] = useState("LIVE-04");
-  const [invokerTx, setInvokerTx] = useState("");
   const [utilityType, setUtilityType] = useState("all");
   const [limit, setLimit] = useState("10");
-  const [bearerToken, setBearerToken] = useState("");
+  const [bearerToken, setBearerToken] = useState(() => {
+    return localStorage.getItem(BEARER_STORAGE_KEY) || "";
+  });
   const [showToken, setShowToken] = useState(false);
+
+  useEffect(() => {
+    localStorage.setItem(BEARER_STORAGE_KEY, bearerToken);
+  }, [bearerToken]);
 
   const isDateRangeValid = useMemo(() => {
     return atStartOfDay(fromDate).getTime() <= atEndOfDay(toDate).getTime();
   }, [fromDate, toDate]);
-
-  const isPipelineMode = searchMode === "pipeline";
-  const requiresInvokerTx = searchMode === "utility" || searchMode === "rho";
 
   const handleSearch = () => {
     if (!bearerToken.trim()) {
@@ -81,148 +80,54 @@ export default function FilterPanel({ onSearch, loading = false }: FilterPanelPr
       return;
     }
 
-    if (requiresInvokerTx && !invokerTx.trim()) {
-      toast.error("InvokerTx es requerido para este tipo de búsqueda.");
-      return;
-    }
-
     const parsedLimit = Number(limit);
 
     const filters: MetricsFilters = {
       fromDate: atStartOfDay(fromDate),
       toDate: atEndOfDay(toDate),
-      site: site || undefined,
-      invokerTx: isPipelineMode ? undefined : invokerTx.trim() || undefined,
+      site,
       utilityType: utilityType === "all" ? undefined : utilityType,
       limit: Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : undefined,
       bearerToken: bearerToken.trim(),
-      searchMode,
-      iterateAllInvokerTx: isPipelineMode,
+      searchMode: "pipeline",
+      iterateAllInvokerTx: true,
     };
 
-    console.debug("[FilterPanel] filters =", filters);
     onSearch(filters);
   };
 
   return (
-    <div className="rounded-lg border border-border bg-card p-4 space-y-4">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-          Filtros de consulta
-        </h2>
-
-        <div className="w-full max-w-[280px]">
-          <Select value={searchMode} onValueChange={(v) => setSearchMode(v as SearchMode)}>
-            <SelectTrigger className="font-mono text-xs">
-              <Settings2 className="mr-2 h-3.5 w-3.5" />
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {SEARCH_MODES.map((mode) => (
-                <SelectItem key={mode.value} value={mode.value}>
-                  {mode.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
-
+    <div className="space-y-4 rounded-lg border border-border bg-card p-4">
       <div className="space-y-1.5">
-        <Label className="text-xs text-muted-foreground flex items-center gap-1.5">
-          <KeyRound className="h-3 w-3" />
-          Bearer Token
-        </Label>
-
-        <div className="flex gap-2">
-          <div className="relative flex-1">
-            <Input
-              type={showToken ? "text" : "password"}
-              placeholder="Pega tu Bearer Token aquí..."
-              className="font-mono text-xs pr-10"
-              value={bearerToken}
-              onChange={(e) => setBearerToken(e.target.value)}
-              autoComplete="off"
-            />
-            <button
-              type="button"
-              onClick={() => setShowToken((prev) => !prev)}
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-            >
-              {showToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-            </button>
-          </div>
-
-          {bearerToken.trim() && (
-            <span className="flex items-center text-xs text-emerald-500 font-medium">
-              ✓ Configurado
-            </span>
-          )}
+        <Label className="text-xs text-muted-foreground">Bearer Token</Label>
+        <div className="relative">
+          <Input
+            type={showToken ? "text" : "password"}
+            placeholder="Pega aquí el bearer token"
+            className="pr-10 font-mono text-xs"
+            value={bearerToken}
+            onChange={(e) => setBearerToken(e.target.value)}
+          />
+          <button
+            type="button"
+            onClick={() => setShowToken((v) => !v)}
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground"
+          >
+            {showToken ? (
+              <EyeOff className="h-4 w-4" />
+            ) : (
+              <Eye className="h-4 w-4" />
+            )}
+          </button>
         </div>
       </div>
 
-      {isPipelineMode && (
-        <div className="rounded-md border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-400 flex items-start gap-2">
-          <Layers3 className="h-4 w-4 mt-0.5 shrink-0" />
-          <div>
-            Se consultará primero MU para obtener todos los <span className="font-mono">invokerTx</span>,
-            y luego se construirán las métricas que se renderizan en la tabla.
-          </div>
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
-        <div className="space-y-1.5">
-          <Label className="text-xs text-muted-foreground">Fecha inicio</Label>
-          <Popover>
-            <PopoverTrigger asChild>
-              <Button
-                variant="outline"
-                className={cn("w-full justify-start text-left font-mono text-xs")}
-              >
-                <CalendarIcon className="mr-1.5 h-3.5 w-3.5" />
-                {format(fromDate, "yyyy-MM-dd")}
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent className="w-auto p-0" align="start">
-              <Calendar
-                mode="single"
-                selected={fromDate}
-                onSelect={(d) => d && setFromDate(d)}
-                className="p-3 pointer-events-auto"
-              />
-            </PopoverContent>
-          </Popover>
-        </div>
-
-        <div className="space-y-1.5">
-          <Label className="text-xs text-muted-foreground">Fecha fin</Label>
-          <Popover>
-            <PopoverTrigger asChild>
-              <Button
-                variant="outline"
-                className={cn("w-full justify-start text-left font-mono text-xs")}
-              >
-                <CalendarIcon className="mr-1.5 h-3.5 w-3.5" />
-                {format(toDate, "yyyy-MM-dd")}
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent className="w-auto p-0" align="start">
-              <Calendar
-                mode="single"
-                selected={toDate}
-                onSelect={(d) => d && setToDate(d)}
-                className="p-3 pointer-events-auto"
-              />
-            </PopoverContent>
-          </Popover>
-        </div>
-
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <div className="space-y-1.5">
           <Label className="text-xs text-muted-foreground">Site</Label>
           <Select value={site} onValueChange={setSite}>
             <SelectTrigger className="font-mono text-xs">
-              <SelectValue />
+              <SelectValue placeholder="Selecciona site" />
             </SelectTrigger>
             <SelectContent>
               {SITES.map((s) => (
@@ -232,17 +137,6 @@ export default function FilterPanel({ onSearch, loading = false }: FilterPanelPr
               ))}
             </SelectContent>
           </Select>
-        </div>
-
-        <div className="space-y-1.5">
-          <Label className="text-xs text-muted-foreground">InvokerTx</Label>
-          <Input
-            placeholder={isPipelineMode ? "Automático: se toman todos desde MU" : "Ej: KUSUT05402ZZ"}
-            className="font-mono text-xs"
-            value={invokerTx}
-            onChange={(e) => setInvokerTx(e.target.value.toUpperCase())}
-            disabled={isPipelineMode}
-          />
         </div>
 
         <div className="space-y-1.5">
@@ -263,9 +157,7 @@ export default function FilterPanel({ onSearch, loading = false }: FilterPanelPr
         </div>
 
         <div className="space-y-1.5">
-          <Label className="text-xs text-muted-foreground">
-            {isPipelineMode ? "Límite invokerTx" : "Límite"}
-          </Label>
+          <Label className="text-xs text-muted-foreground">Límite invokerTx</Label>
           <Input
             type="number"
             min="1"
@@ -274,6 +166,60 @@ export default function FilterPanel({ onSearch, loading = false }: FilterPanelPr
             value={limit}
             onChange={(e) => setLimit(e.target.value)}
           />
+        </div>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        <div className="space-y-1.5">
+          <Label className="text-xs text-muted-foreground">Fecha inicio</Label>
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                variant="outline"
+                className={cn(
+                  "w-full justify-start font-mono text-xs",
+                  !fromDate && "text-muted-foreground"
+                )}
+              >
+                <CalendarIcon className="mr-2 h-4 w-4" />
+                {fromDate ? format(fromDate, "dd/MM/yyyy") : "Selecciona fecha"}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className="w-auto p-0" align="start">
+              <Calendar
+                mode="single"
+                selected={fromDate}
+                onSelect={(d) => d && setFromDate(d)}
+                initialFocus
+              />
+            </PopoverContent>
+          </Popover>
+        </div>
+
+        <div className="space-y-1.5">
+          <Label className="text-xs text-muted-foreground">Fecha fin</Label>
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                variant="outline"
+                className={cn(
+                  "w-full justify-start font-mono text-xs",
+                  !toDate && "text-muted-foreground"
+                )}
+              >
+                <CalendarIcon className="mr-2 h-4 w-4" />
+                {toDate ? format(toDate, "dd/MM/yyyy") : "Selecciona fecha"}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className="w-auto p-0" align="start">
+              <Calendar
+                mode="single"
+                selected={toDate}
+                onSelect={(d) => d && setToDate(d)}
+                initialFocus
+              />
+            </PopoverContent>
+          </Popover>
         </div>
       </div>
 
@@ -289,11 +235,7 @@ export default function FilterPanel({ onSearch, loading = false }: FilterPanelPr
         className="glow-primary"
       >
         <Search className="mr-2 h-4 w-4" />
-        {loading
-          ? "Consultando..."
-          : isPipelineMode
-          ? "Consultar todos los invokerTx"
-          : "Ejecutar consulta"}
+        {loading ? "Consultando..." : "Consultar todos los invokerTx"}
       </Button>
     </div>
   );
