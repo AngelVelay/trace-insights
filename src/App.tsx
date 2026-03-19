@@ -6,6 +6,7 @@ import AppHeader from "@/components/AppHeader";
 import Dashboard from "./pages/Dashboard";
 import VersionadoEntornos from "./pages/VersionadoEntornos";
 import VersionadoIncidentes from "./pages/VersionadoIncidentes";
+import MonitoreoSecurizacionLive from "./pages/MonitoreoSecurizacionLive";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -20,6 +21,10 @@ const App = () => (
           <Route path="/" element={<Dashboard />} />
           <Route path="/versionado/entornos" element={<VersionadoEntornos />} />
           <Route path="/versionado/incidentes" element={<VersionadoIncidentes />} />
+          <Route
+            path="/monitoreo/securizacion-live"
+            element={<MonitoreoSecurizacionLive />}
+          />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </BrowserRouter>

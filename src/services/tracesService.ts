@@ -1,6 +1,3 @@
-// ============================================================
-// RHO Traces Service
-// ============================================================
 import type {
   RawSpan,
   NormalizedSpan,
@@ -142,7 +139,7 @@ function buildRhoSpanSearchUrl(params: {
   url.searchParams.set("toDate", toDate);
   url.searchParams.set(
     "properties",
-    "channel-code,environ-code,env,product-code,returncode"
+    "channel-code,environ-code,env,product-code,returncode,utilitytype,invokerTx,invokerLibrary,invokedparam,databaseInstance,collection,databaseQuery"
   );
   url.searchParams.set("profile", "default");
 
@@ -187,6 +184,18 @@ function getSqlMethod(databaseQuery: string): string {
   return ["SELECT", "INSERT", "UPDATE", "DELETE"].includes(first)
     ? first
     : "DESCONOCIDO";
+}
+
+function getMongoOperation(item: TraceEntry): string {
+  const source = `${item.invokedparam} ${item.name}`.toUpperCase();
+
+  if (source.includes("FIND")) return "FIND";
+  if (source.includes("INSERT")) return "INSERT";
+  if (source.includes("UPDATE")) return "UPDATE";
+  if (source.includes("DELETE")) return "DELETE";
+  if (source.includes("AGGREGATE")) return "AGGREGATE";
+
+  return item.invokedparam || item.name || "OPERACION";
 }
 
 function formatTraceDuration(ms: number): string {
@@ -236,6 +245,161 @@ function collectTraceEntries(
   }
 }
 
+function buildJdbcSection(items: TraceEntry[], lines: string[]) {
+  if (!items.length) return;
+
+  lines.push("JDBC");
+
+  const byLibrary = new Map<string, TraceEntry[]>();
+  for (const item of items) {
+    const key = item.invokerLibrary || "(sin library)";
+    const arr = byLibrary.get(key) ?? [];
+    arr.push(item);
+    byLibrary.set(key, arr);
+  }
+
+  for (const [library, libraryItems] of byLibrary.entries()) {
+    const avg =
+      libraryItems.reduce((sum, item) => sum + item.durationMs, 0) /
+      libraryItems.length;
+
+    lines.push(`└── ${library} (Tiempo promedio: ${formatTraceDuration(avg)})`);
+
+    const byMethod = new Map<string, TraceEntry[]>();
+    for (const item of libraryItems) {
+      const method = getSqlMethod(item.databaseQuery) || "DESCONOCIDO";
+      const arr = byMethod.get(method) ?? [];
+      arr.push(item);
+      byMethod.set(method, arr);
+    }
+
+    for (const [method, methodItems] of byMethod.entries()) {
+      lines.push(`    ├── ${method}: ${methodItems.length} saltos`);
+
+      for (const item of methodItems) {
+        lines.push(
+          `    │   ├── ${item.name} (${formatTraceDuration(item.durationMs)})`
+        );
+        if (item.invokedparam) {
+          lines.push(`    │   │   └── ${item.invokedparam}`);
+        }
+      }
+    }
+
+    lines.push("");
+  }
+}
+
+function buildMongoSection(items: TraceEntry[], lines: string[]) {
+  if (!items.length) return;
+
+  lines.push("MONGO CONNECTOR");
+
+  const avgSection =
+    items.reduce((sum, item) => sum + item.durationMs, 0) / items.length;
+  lines.push(`└── Tiempo promedio sección: ${formatTraceDuration(avgSection)}`);
+
+  const grouped = new Map<
+    string,
+    {
+      invokerLibrary: string;
+      databaseInstance: string;
+      collection: string;
+      operation: string;
+      total: number;
+      count: number;
+    }
+  >();
+
+  for (const item of items) {
+    const operation = getMongoOperation(item);
+    const key = [
+      item.invokerLibrary || "(sin library)",
+      item.databaseInstance || "",
+      item.collection || "",
+      operation,
+    ].join("|");
+
+    const current = grouped.get(key) ?? {
+      invokerLibrary: item.invokerLibrary || "(sin library)",
+      databaseInstance: item.databaseInstance || "",
+      collection: item.collection || "",
+      operation,
+      total: 0,
+      count: 0,
+    };
+
+    current.total += item.durationMs;
+    current.count += 1;
+    grouped.set(key, current);
+  }
+
+  for (const group of grouped.values()) {
+    const avg = group.total / group.count;
+    lines.push(
+      `    ├── ${group.invokerLibrary} (${formatTraceDuration(avg)})`
+    );
+
+    const dbCollection = `${group.databaseInstance}${
+      group.databaseInstance || group.collection ? " - " : ""
+    }${group.collection}`.trim();
+
+    if (dbCollection) {
+      lines.push(`    │   ├── ${dbCollection}`);
+    }
+
+    lines.push(`    │   └── ${group.operation}`);
+  }
+
+  lines.push("");
+}
+
+function buildGenericSection(
+  title: string,
+  items: TraceEntry[],
+  lines: string[]
+) {
+  if (!items.length) return;
+
+  lines.push(title);
+
+  const avgSection =
+    items.reduce((sum, item) => sum + item.durationMs, 0) / items.length;
+  lines.push(`└── Tiempo promedio sección: ${formatTraceDuration(avgSection)}`);
+
+  const grouped = new Map<
+    string,
+    { item: TraceEntry; total: number; count: number }
+  >();
+
+  for (const item of items) {
+    const key = `${item.invokerLibrary}|${item.name}|${item.invokedparam}`;
+    const current = grouped.get(key) ?? { item, total: 0, count: 0 };
+    current.total += item.durationMs;
+    current.count += 1;
+    grouped.set(key, current);
+  }
+
+  for (const { item, total, count } of grouped.values()) {
+    const avg = total / count;
+
+    lines.push(
+      `    ├── ${item.invokerLibrary || "(sin library)"} (${formatTraceDuration(avg)})`
+    );
+    lines.push(`    │   └── ${item.name}`);
+
+    if (item.invokedparam) {
+      lines.push(`    │   │   └── ${item.invokedparam}`);
+    }
+
+    if (count > 1) {
+      lines.push(`    │   │   └── Repeticiones: ${count}`);
+    }
+  }
+
+  lines.push("");
+}
+
 function buildTraceSummary(entries: TraceEntry[]): string {
   const totalResultados = entries.length;
   const tiempoTotalSaltos = entries.reduce((sum, item) => sum + item.durationMs, 0);
@@ -251,131 +415,26 @@ function buildTraceSummary(entries: TraceEntry[]): string {
   lines.push("=== DETALLE DE TRAZAS ===");
   lines.push("");
 
-  const buildGroupedSection = (
-    title: string,
-    items: TraceEntry[],
-    keyFn: (item: TraceEntry) => string,
-    renderFn: (item: TraceEntry, count: number, avg: number) => string[]
-  ) => {
-    if (!items.length) return;
+  buildJdbcSection(
+    entries.filter((e) => e.utilitytype === "Jdbc"),
+    lines
+  );
 
-    lines.push(title);
+  buildMongoSection(
+    entries.filter((e) => e.utilitytype === "DaasMongoConnector"),
+    lines
+  );
 
-    const avgSection =
-      items.reduce((sum, item) => sum + item.durationMs, 0) / items.length;
-    lines.push(`└── Tiempo promedio sección: ${formatTraceDuration(avgSection)}`);
-
-    const grouped = new Map<
-      string,
-      { item: TraceEntry; count: number; total: number }
-    >();
-
-    for (const item of items) {
-      const key = keyFn(item);
-      const current = grouped.get(key) ?? { item, count: 0, total: 0 };
-      current.count += 1;
-      current.total += item.durationMs;
-      grouped.set(key, current);
-    }
-
-    for (const { item, count, total } of grouped.values()) {
-      const avg = total / count;
-      lines.push(...renderFn(item, count, avg));
-    }
-
-    lines.push("");
-  };
-
-  buildGroupedSection(
+  buildGenericSection(
     "API-CONNECTOR",
     entries.filter((e) => e.utilitytype === "APIInternalConnectorImpl"),
-    (item) => `${item.invokerLibrary}|${item.name}|${item.invokedparam}`,
-    (item, count, avg) => {
-      const out = [
-        `    ├── ${item.invokerLibrary || "(sin library)"} (${formatTraceDuration(avg)})`,
-        `    │   └── ${item.name}`,
-      ];
-      if (item.invokedparam) out.push(`    │       └── ${item.invokedparam}`);
-      if (count > 1) out.push(`    │       └── Repeticiones: ${count}`);
-      return out;
-    }
+    lines
   );
 
-  buildGroupedSection(
+  buildGenericSection(
     "CICS",
     entries.filter((e) => e.utilitytype === "InterBackendCics"),
-    (item) => `${item.invokerLibrary}|${item.name}|${item.invokedparam}`,
-    (item, count, avg) => {
-      const out = [
-        `    ├── ${item.invokerLibrary || "(sin library)"} (${formatTraceDuration(avg)})`,
-        `    │   └── ${item.name}`,
-      ];
-      if (item.invokedparam) out.push(`    │       └── ${item.invokedparam}`);
-      if (count > 1) out.push(`    │       └── Repeticiones: ${count}`);
-      return out;
-    }
-  );
-
-  const jdbcEntries = entries.filter((e) => e.utilitytype === "Jdbc");
-  if (jdbcEntries.length) {
-    lines.push("JDBC");
-
-    const byLibrary = new Map<string, TraceEntry[]>();
-    for (const item of jdbcEntries) {
-      const key = item.invokerLibrary || "(sin library)";
-      const arr = byLibrary.get(key) ?? [];
-      arr.push(item);
-      byLibrary.set(key, arr);
-    }
-
-    for (const [lib, items] of byLibrary.entries()) {
-      const avg =
-        items.reduce((sum, item) => sum + item.durationMs, 0) / items.length;
-
-      lines.push(`└── ${lib} (Tiempo promedio: ${formatTraceDuration(avg)})`);
-
-      const methods = new Map<string, TraceEntry[]>();
-      for (const item of items) {
-        const method = getSqlMethod(item.databaseQuery) || "DESCONOCIDO";
-        const arr = methods.get(method) ?? [];
-        arr.push(item);
-        methods.set(method, arr);
-      }
-
-      for (const [method, methodItems] of methods.entries()) {
-        lines.push(`    ├── ${method}: ${methodItems.length} saltos`);
-        for (const item of methodItems) {
-          lines.push(
-            `    │   ├── ${item.name} (${formatTraceDuration(item.durationMs)})`
-          );
-          if (item.invokedparam) {
-            lines.push(`    │   │   └── ${item.invokedparam}`);
-          }
-        }
-      }
-
-      lines.push("");
-    }
-  }
-
-  buildGroupedSection(
-    "MONGO CONNECTOR",
-    entries.filter((e) => e.utilitytype === "DaasMongoConnector"),
-    (item) =>
-      `${item.invokerLibrary}|${item.databaseInstance}|${item.collection}|${item.invokedparam}`,
-    (item, count, avg) => {
-      const dbCol = `${item.databaseInstance || ""}${
-        item.databaseInstance || item.collection ? " - " : ""
-      }${item.collection || ""}`.trim();
-
-      const out = [
-        `    ├── ${item.invokerLibrary || "(sin library)"} (${formatTraceDuration(avg)})`,
-      ];
-      if (dbCol) out.push(`    │   ├── ${dbCol}`);
-      if (item.invokedparam) out.push(`    │   └── ${item.invokedparam}`);
-      if (count > 1) out.push(`    │       └── Repeticiones: ${count}`);
-      return out;
-    }
+    lines
   );
 
   return lines.join("\n").trim();

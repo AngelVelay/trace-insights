@@ -1,7 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 import LoadingOverlay from "@/components/LoadingOverlay";
 import { useBearerToken } from "@/hooks/useBearerToken";
-import DateTimePicker from "@/components/DateTimePicker";
 import {
   Eye,
   EyeOff,
@@ -16,6 +15,7 @@ import {
   BarChart3,
   Table2,
   LayoutPanelTop,
+  Sheet,
 } from "lucide-react";
 import { format } from "date-fns";
 import {
@@ -77,18 +77,9 @@ function formatMs(value: number): string {
 }
 
 function getRowClassByPhase(phase: EnvironmentMonitoringDailyRow["phase"]): string {
-  if (phase === "before") {
-    return "bg-blue-500/10 border-l-4 border-blue-500";
-  }
-
-  if (phase === "installation") {
-    return "bg-amber-500/10 border-l-4 border-amber-500";
-  }
-
-  if (phase === "after") {
-    return "bg-emerald-500/10 border-l-4 border-emerald-500";
-  }
-
+  if (phase === "before") return "bg-blue-500/10 border-l-4 border-blue-500";
+  if (phase === "installation") return "bg-amber-500/10 border-l-4 border-amber-500";
+  if (phase === "after") return "bg-emerald-500/10 border-l-4 border-emerald-500";
   return "";
 }
 
@@ -102,10 +93,6 @@ function escapeCsv(value: string | number): string {
 
 function buildCsv(result: EnvironmentMonitoringDailyResult): string {
   const headers = [
-    "Entorno",
-    "Modo",
-    "Dia de instalacion",
-    "Fase",
     "Fecha",
     "Technical Errors",
     "Executions",
@@ -113,25 +100,10 @@ function buildCsv(result: EnvironmentMonitoringDailyResult): string {
   ];
 
   const rows = result.rows.map((row) => [
-    result.environment,
-    result.mode,
-    result.installationDay,
-    row.phase,
     row.date,
     row.technicalErrors,
     row.executions,
-    row.meanSpanDuration,
-  ]);
-
-  rows.push([
-    result.environment,
-    result.mode,
-    result.installationDay,
-    "total",
-    "",
-    result.totals.technicalErrors,
-    result.totals.executions,
-    result.totals.meanSpanDuration,
+    formatMs(row.meanSpanDuration),
   ]);
 
   return [headers, ...rows]
@@ -141,10 +113,6 @@ function buildCsv(result: EnvironmentMonitoringDailyResult): string {
 
 function buildSheetsText(result: EnvironmentMonitoringDailyResult): string {
   const headers = [
-    "Entorno",
-    "Modo",
-    "Dia de instalacion",
-    "Fase",
     "Fecha",
     "Technical Errors",
     "Executions",
@@ -152,25 +120,32 @@ function buildSheetsText(result: EnvironmentMonitoringDailyResult): string {
   ];
 
   const rows = result.rows.map((row) => [
-    result.environment,
-    result.mode,
-    result.installationDay,
-    row.phase,
     row.date,
     String(row.technicalErrors),
     String(row.executions),
-    String(row.meanSpanDuration),
+    formatMs(row.meanSpanDuration),
   ]);
 
-  rows.push([
-    result.environment,
-    result.mode,
-    result.installationDay,
-    "total",
-    "",
-    String(result.totals.technicalErrors),
-    String(result.totals.executions),
-    String(result.totals.meanSpanDuration),
+  return [headers, ...rows].map((row) => row.join("\t")).join("\n");
+}
+
+function buildChartDataSheetsText(
+  result: EnvironmentMonitoringDailyResult | null
+): string {
+  if (!result) return "";
+
+  const headers = [
+    "Fecha",
+    "Technical Errors",
+    "Executions",
+    "Span Duration",
+  ];
+
+  const rows = result.rows.map((row) => [
+    row.date,
+    String(row.technicalErrors),
+    String(row.executions),
+    String(Number(row.meanSpanDuration.toFixed(2))),
   ]);
 
   return [headers, ...rows].map((row) => row.join("\t")).join("\n");
@@ -223,22 +198,16 @@ function buildOverlayChartData(result: EnvironmentMonitoringDailyResult | null) 
       installationTechnicalErrors: installation?.technicalErrors ?? null,
       installationExecutions: installation?.executions ?? null,
       installationMeanSpanDuration:
-        installation != null
-          ? Number(installation.meanSpanDuration.toFixed(2))
-          : null,
+        installation != null ? Number(installation.meanSpanDuration.toFixed(2)) : null,
     };
   });
 }
 
 async function copySvgChartAsImage(container: HTMLDivElement | null) {
-  if (!container) {
-    throw new Error("No se encontró el gráfico.");
-  }
+  if (!container) throw new Error("No se encontró el gráfico.");
 
   const svg = container.querySelector("svg");
-  if (!svg) {
-    throw new Error("No se encontró el SVG del gráfico.");
-  }
+  if (!svg) throw new Error("No se encontró el SVG del gráfico.");
 
   const serializer = new XMLSerializer();
   const source = serializer.serializeToString(svg);
@@ -262,9 +231,7 @@ async function copySvgChartAsImage(container: HTMLDivElement | null) {
     canvas.height = Math.max(1, Math.floor(rect.height));
 
     const ctx = canvas.getContext("2d");
-    if (!ctx) {
-      throw new Error("No se pudo crear el canvas.");
-    }
+    if (!ctx) throw new Error("No se pudo crear el canvas.");
 
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -274,9 +241,7 @@ async function copySvgChartAsImage(container: HTMLDivElement | null) {
       canvas.toBlob(resolve, "image/png")
     );
 
-    if (!blob) {
-      throw new Error("No se pudo generar la imagen PNG.");
-    }
+    if (!blob) throw new Error("No se pudo generar la imagen PNG.");
 
     await navigator.clipboard.write([
       new ClipboardItem({
@@ -319,38 +284,38 @@ function MetricChart({
           }}
         >
           <Image className="mr-2 h-4 w-4" />
-          Copiar gráfico
+          Copiar imagen
         </Button>
       </div>
 
       <div ref={copyRef} className="h-[280px]">
         <ResponsiveContainer width="100%" height="100%">
-  <LineChart data={data}>
-    <CartesianGrid strokeDasharray="3 3" />
-    <XAxis dataKey="xLabel" tick={{ fontSize: 11 }} />
-    <YAxis tick={{ fontSize: 11 }} />
-    <Tooltip
-      contentStyle={{
-        backgroundColor: "hsl(var(--card))",
-        border: "1px solid hsl(var(--border))",
-        borderRadius: "12px",
-      }}
-      labelStyle={{
-        color: "#f59e0b",
-        fontWeight: 700,
-      }}
-    />
-    <Legend />
-    <Line
-      type="monotone"
-      dataKey={dataKey}
-      name={title}
-      stroke="#3b82f6"
-      strokeWidth={2}
-      dot={{ r: 3 }}
-    />
-  </LineChart>
-</ResponsiveContainer>
+          <LineChart data={data}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="xLabel" tick={{ fontSize: 11 }} />
+            <YAxis tick={{ fontSize: 11 }} />
+            <Tooltip
+              contentStyle={{
+                backgroundColor: "hsl(var(--card))",
+                border: "1px solid hsl(var(--border))",
+                borderRadius: "12px",
+              }}
+              labelStyle={{
+                color: "#f59e0b",
+                fontWeight: 700,
+              }}
+            />
+            <Legend />
+            <Line
+              type="monotone"
+              dataKey={dataKey}
+              name={title}
+              stroke="#3b82f6"
+              strokeWidth={2}
+              dot={{ r: 3 }}
+            />
+          </LineChart>
+        </ResponsiveContainer>
       </div>
     </div>
   );
@@ -391,7 +356,7 @@ function OverlayMetricChart({
           }}
         >
           <Image className="mr-2 h-4 w-4" />
-          Copiar gráfico
+          Copiar imagen
         </Button>
       </div>
 
@@ -536,13 +501,40 @@ export default function VersionadoEntornos() {
     }
   };
 
+  const handleCopyChartData = async () => {
+    if (!result) {
+      toast.error("No hay datos del gráfico para copiar.");
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(buildChartDataSheetsText(result));
+      toast.success(
+        "Datos del gráfico copiados. Pégalos en Google Sheets y crea el gráfico allí."
+      );
+    } catch {
+      toast.error("No se pudo copiar la tabla de datos del gráfico.");
+    }
+  };
+
+  const updateInstallationTime = (timeValue: string) => {
+    const [hours, minutes] = timeValue.split(":").map(Number);
+    const next = new Date(installationDay);
+    next.setHours(Number.isFinite(hours) ? hours : 0);
+    next.setMinutes(Number.isFinite(minutes) ? minutes : 0);
+    next.setSeconds(0);
+    next.setMilliseconds(0);
+    setInstallationDay(next);
+  };
+
   const showCharts = viewMode === "charts" || viewMode === "both";
   const showTable = viewMode === "table" || viewMode === "both";
   const isComplete = result?.mode === "complete";
 
   return (
     <div className="min-h-screen gradient-mesh">
-<LoadingOverlay show={loading} />
+      <LoadingOverlay show={loading} />
+
       <main className="container space-y-6 py-6">
         <div className="space-y-4 rounded-lg border border-border bg-card p-4">
           <div className="space-y-1.5">
@@ -583,31 +575,49 @@ export default function VersionadoEntornos() {
             </div>
 
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">Día de instalación</Label>
-          <Popover>
-  <PopoverTrigger asChild>
-    <Button
-      variant="outline"
-      className={cn(
-        "w-full justify-start font-mono text-xs",
-        !installationDay && "text-muted-foreground"
-      )}
-    >
-      <CalendarIcon className="mr-2 h-4 w-4" />
-      {installationDay
-        ? format(installationDay, "dd/MM/yyyy")
-        : "Selecciona fecha"}
-    </Button>
-  </PopoverTrigger>
-  <PopoverContent className="w-auto p-0" align="start">
-    <Calendar
-      mode="single"
-      selected={installationDay}
-      onSelect={(d) => d && setInstallationDay(d)}
-      initialFocus
-    />
-  </PopoverContent>
-</Popover>
+              <Label className="text-xs text-muted-foreground">Día y hora de instalación</Label>
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button
+                    variant="outline"
+                    className={cn(
+                      "w-full justify-start font-mono text-xs",
+                      !installationDay && "text-muted-foreground"
+                    )}
+                  >
+                    <CalendarIcon className="mr-2 h-4 w-4" />
+                    {installationDay
+                      ? format(installationDay, "dd/MM/yyyy HH:mm")
+                      : "Selecciona fecha y hora"}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto space-y-3 p-3" align="start">
+                  <Calendar
+                    mode="single"
+                    selected={installationDay}
+                    onSelect={(d) => {
+                      if (!d) return;
+                      const next = new Date(d);
+                      next.setHours(installationDay.getHours());
+                      next.setMinutes(installationDay.getMinutes());
+                      next.setSeconds(0);
+                      next.setMilliseconds(0);
+                      setInstallationDay(next);
+                    }}
+                    initialFocus
+                  />
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-muted-foreground">Hora</Label>
+                    <Input
+                      type="time"
+                      step="60"
+                      className="font-mono text-xs"
+                      value={format(installationDay, "HH:mm")}
+                      onChange={(e) => updateInstallationTime(e.target.value)}
+                    />
+                  </div>
+                </PopoverContent>
+              </Popover>
             </div>
 
             <div className="space-y-1.5">
@@ -643,8 +653,10 @@ export default function VersionadoEntornos() {
 
             <Button type="button" variant="outline" onClick={handleCopySheets} disabled={!result}>
               <Copy className="mr-2 h-4 w-4" />
-              Copiar para Google Sheets
+              Copiar tabla
             </Button>
+
+            
           </div>
 
           <div className="flex flex-wrap gap-2">

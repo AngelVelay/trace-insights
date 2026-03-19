@@ -10,11 +10,14 @@ import {
 } from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
 import { ArrowUpDown } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 interface MetricsTableProps {
   rows: MetricRow[];
   loading?: boolean;
   errorMessage?: string | null;
+  selectedInvokerTx?: string | null;
+  onSelectInvokerTx?: (invokerTx: string) => void;
 }
 
 type SortKey = keyof MetricRow;
@@ -121,18 +124,6 @@ function parseLibraryItems(value: unknown): LibraryItem[] {
     } catch {
       return [];
     }
-  }
-
-  if (typeof value === "object") {
-    const obj = value as Record<string, unknown>;
-    const invokerLibrary = String(obj.invokerLibrary ?? "").trim();
-    if (!invokerLibrary) return [];
-    return [
-      {
-        invokerLibrary,
-        count: Number(obj.count ?? 0),
-      },
-    ];
   }
 
   return [];
@@ -242,10 +233,7 @@ function utilityTypeSearchText(value: unknown): string {
   const items = parseUtilityTypeItems(value);
   if (!items.length) return String(value ?? "");
   return items
-    .map(
-      (item) =>
-        `${item.invokerLibrary} ${item.utilitytype} ${item.count} exec`
-    )
+    .map((item) => `${item.invokerLibrary} ${item.utilitytype} ${item.count} exec`)
     .join(" ")
     .toLowerCase();
 }
@@ -272,15 +260,28 @@ function formatExecDuration(ms: number): string {
   return `${ms.toFixed(2)} ms`;
 }
 
-function renderInvokerTxCell(value: unknown) {
+function renderInvokerTxCell(
+  value: unknown,
+  selectedInvokerTx?: string | null,
+  onSelectInvokerTx?: (invokerTx: string) => void
+) {
   const item = parseInvokerTxItem(value);
 
   if (!item) {
     return <span className="text-muted-foreground">-</span>;
   }
 
+  const isSelected = selectedInvokerTx === item.invokerTx;
+
   return (
-    <div>
+    <button
+      type="button"
+      onClick={() => onSelectInvokerTx?.(item.invokerTx)}
+      className={cn(
+        "w-full rounded-md p-2 text-left transition-colors hover:bg-muted/50",
+        isSelected && "bg-primary/10 ring-1 ring-primary/30"
+      )}
+    >
       <div className="font-bold text-primary">{item.invokerTx}</div>
       <div className="italic text-muted-foreground">
         {item.sum_num_executions} exec
@@ -288,7 +289,7 @@ function renderInvokerTxCell(value: unknown) {
       <div className="italic text-muted-foreground">
         {formatExecDuration(item.mean_span_duration)}
       </div>
-    </div>
+    </button>
   );
 }
 
@@ -377,6 +378,8 @@ export default function MetricsTable({
   rows,
   loading = false,
   errorMessage = null,
+  selectedInvokerTx,
+  onSelectInvokerTx,
 }: MetricsTableProps) {
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("invokerTx");
@@ -492,7 +495,13 @@ export default function MetricsTable({
               filtered.map((row, i) => (
                 <TableRow key={`${i}`} className="font-mono text-xs">
                   <TableCell>{row.site}</TableCell>
-                  <TableCell>{renderInvokerTxCell(row.invokerTx)}</TableCell>
+                  <TableCell>
+                    {renderInvokerTxCell(
+                      row.invokerTx,
+                      selectedInvokerTx,
+                      onSelectInvokerTx
+                    )}
+                  </TableCell>
                   <TableCell>{renderLibraryCell(row.invokerLibrary)}</TableCell>
                   <TableCell>{renderUtilityTypeCell(row.utilitytype)}</TableCell>
                   <TableCell>{renderInvokedParamCell(row.invokedparam)}</TableCell>

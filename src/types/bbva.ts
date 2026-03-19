@@ -122,6 +122,7 @@ export interface KPISummary {
   totalInvokerTx: number;
   totalUtilityTypes: number;
   totalInvokedParams: number;
+  totalExecutions: number;
   totalJumps: number;
   totalDurationMs: number;
   avgDurationMs: number;

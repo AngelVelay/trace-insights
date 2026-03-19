@@ -1,4 +1,4 @@
-import { addDays, endOfDay, format, startOfDay, subDays } from "date-fns";
+import { addDays, format, subDays } from "date-fns";
 import type { NanoTimestamp } from "@/types/bbva";
 import { apiRequest, buildAuthHeaders } from "./httpClient";
 import { dateRangeToNano } from "./dateUtils";
@@ -10,8 +10,6 @@ export type EnvironmentOption =
   | "OCT"
   | "PRZ"
   | "LIVE-02";
-
-
 
 export interface EnvironmentMonitoringFilters {
   environment: EnvironmentOption;
@@ -191,6 +189,7 @@ function buildDailyDates(
   mode: InstallationRangeMode
 ): Array<{ date: Date; label: string; phase: EnvironmentPhase; offset: number }> {
   const base = cloneDate(installationDay);
+
   const dates: Array<{
     date: Date;
     label: string;
@@ -262,9 +261,9 @@ export async function fetchEnvironmentMonitoringDaily(
   const rows = await Promise.all(
     days.map(async ({ date, label, phase, offset }) => {
       const fromDate = new Date(date);
-const toDate = new Date(date);
-toDate.setDate(toDate.getDate() + 1);
-toDate.setMilliseconds(toDate.getMilliseconds() - 1);
+      const toDate = new Date(date);
+      toDate.setDate(toDate.getDate() + 1);
+      toDate.setMilliseconds(toDate.getMilliseconds() - 1);
 
       const summary = await fetchEnvironmentMonitoringSummary({
         environment: filters.environment,
@@ -302,7 +301,7 @@ toDate.setMilliseconds(toDate.getMilliseconds() - 1);
   return {
     environment: filters.environment,
     mode: filters.rangeMode,
-    installationDay: format(filters.installationDay, "dd/MM/yyyy"),
+    installationDay: format(filters.installationDay, "dd/MM/yyyy HH:mm"),
     rows,
     totals,
   };

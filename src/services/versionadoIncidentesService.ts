@@ -13,6 +13,21 @@ export type EnvironmentOption =
 
 export type InstallationRangeMode = "before" | "after" | "complete";
 
+export type IncidentAiProvider =
+  | "heuristic"
+  | "local"
+  | "openai"
+  | "gemini";
+
+export type IncidentAiModel =
+  | "heuristic-summary"
+  | "local-gemini-nano"
+  | "gpt-4.1-nano"
+  | "gemini-2.5-flash-lite"
+  | "gemini-2.5-flash"
+  | "gemini-2.0-flash-lite"
+  | "gemini-2.0-flash";
+
 interface AggregationBucket {
   bucket?: {
     name?: string;
@@ -517,6 +532,16 @@ export interface IncidentMonitoringResult {
   };
 }
 
+type LocalLanguageModelSession = {
+  prompt: (input: string) => Promise<string>;
+  destroy?: () => Promise<void> | void;
+};
+
+type LocalLanguageModel = {
+  availability?: () => Promise<string>;
+  create?: () => Promise<LocalLanguageModelSession>;
+};
+
 const MU_WORK_BASE = "https://mu.work-02.nextgen.igrupobbva";
 const MU_LIVE_BASE = "https://mu.live-02.nextgen.igrupobbva";
 const RHO_WORK_BASE = "https://rho.work-02.nextgen.igrupobbva";
@@ -568,7 +593,6 @@ function buildTopTrxUrl(params: {
   url.searchParams.set("propertiesSize", "20000");
   url.searchParams.set("aggregate", '"name"');
   url.searchParams.set("q", `${config.qEnv} AND "returncode" == "12"`);
-
   url.searchParams.append("operation", "sum:technical_error");
   url.searchParams.append("operation", "sum:num_executions");
 
@@ -758,42 +782,54 @@ function summarizeDescription(text: string): string {
   const exceptionMatch =
     source.match(/([A-Za-z0-9_$.]*TimeoutException)/) ||
     source.match(/([A-Za-z0-9_$.]*ExecutionException)/) ||
+    source.match(/([A-Za-z0-9_$.]*DBException)/) ||
+    source.match(/([A-Za-z0-9_$.]*HTTPException)/) ||
     source.match(/([A-Za-z0-9_$.]*Exception)/);
-  const exceptionName = exceptionMatch?.[1]?.split(".").pop() ?? "";
 
+  const exceptionName = exceptionMatch?.[1]?.split(".").pop() ?? "";
   const controlledCode = extractControlledErrorCodeOnly(source);
 
   if (/timeout/i.test(source) && /API-CONNECTOR/i.test(source)) {
     const target = apiId ? ` al invocar ${apiId}` : "";
+    const trxText = trx ? ` en la trx ${trx}` : "";
     const ex = exceptionName ? ` (${exceptionName})` : "";
     const code = controlledCode ? ` [${controlledCode}]` : "";
-    return `Se detectó un timeout en API-CONNECTOR${target}${ex}${code}. El incidente apunta a una degradación, indisponibilidad o latencia elevada en una dependencia remota durante la ejecución transaccional.`;
+    return `Timeout en API-CONNECTOR${target}${trxText}${ex}${code}. Posible indisponibilidad o alta latencia en dependencia remota.`;
   }
 
   if (/composeTransactionResponse/i.test(source)) {
     const trxText = trx ? ` de la transacción ${trx}` : "";
     const codeText = controlledCode ? ` con código ${controlledCode}` : "";
-    return `Se produjo un error controlado en composeTransactionResponse${trxText}${codeText}. La arquitectura no pudo construir correctamente la respuesta transaccional y requiere revisión del flujo funcional asociado.`;
+    return `Error controlado en composeTransactionResponse${trxText}${codeText}. La arquitectura no pudo construir correctamente la respuesta transaccional.`;
   }
 
   if (/CircuitBreaker/i.test(source)) {
-    return "Se activó el Circuit Breaker durante la invocación a un servicio remoto. Esto sugiere fallos repetidos, indisponibilidad o saturación en la dependencia consumida por la transacción.";
+    return "Se activó el Circuit Breaker al consumir una dependencia remota; hay fallos repetidos o saturación del servicio invocado.";
   }
 
   if (/NullPointerException/i.test(source)) {
-    return "Se identificó un NullPointerException en el flujo de ejecución. El incidente sugiere datos nulos, referencias no inicializadas o una validación insuficiente antes de acceder al recurso.";
+    return "Se detectó un NullPointerException en ejecución; probablemente hay datos nulos o referencias sin inicializar en el flujo técnico.";
   }
 
   if (/connection refused/i.test(source)) {
-    return "La conexión fue rechazada por el servicio remoto. El incidente apunta a indisponibilidad del endpoint, configuración incorrecta o problemas de red entre componentes.";
+    return "La conexión fue rechazada por el servicio remoto; puede haber indisponibilidad del endpoint, error de red o configuración incorrecta.";
   }
 
   if (/DBException|JDBC|JPA/i.test(source)) {
-    return "Se detectó un fallo en el acceso a base de datos durante la ejecución. Es recomendable revisar conectividad, tiempos de respuesta, consultas y estado de los recursos persistentes.";
+    return "Se detectó un fallo de acceso a base de datos; conviene revisar conectividad, tiempos de respuesta, consultas y estado de recursos persistentes.";
   }
 
   if (/HTTPException|HTTPClientException|HTTPServerException/i.test(source)) {
-    return "Se produjo un error en la comunicación HTTP durante la invocación de un servicio externo o interno. Debe revisarse la disponibilidad del endpoint y la respuesta obtenida.";
+    return "Se produjo un error HTTP en la invocación de un servicio; revisa disponibilidad del endpoint, payload y respuesta recibida.";
+  }
+
+  if (/CICS/i.test(source)) {
+    return "Se detectó un fallo en la invocación CICS; revisa timeout, configuración del conector y disponibilidad del backend transaccional.";
+  }
+
+  if (exceptionName) {
+    const trxText = trx ? ` en la trx ${trx}` : "";
+    return `Se detectó ${exceptionName}${trxText}. Requiere revisión técnica del flujo y de la dependencia asociada.`;
   }
 
   if (firstLine) {
@@ -803,17 +839,63 @@ function summarizeDescription(text: string): string {
   return source.slice(0, 220);
 }
 
-async function summarizeDescriptionWithAIFrontend(
-  text: string,
-  apiKey?: string
-): Promise<string> {
+async function summarizeDescriptionWithLocalAI(
+  text: string
+): Promise<string | null> {
   const source = String(text || "").trim();
-  if (!source) return "";
+  if (!source) return null;
 
-  const key = String(apiKey || "").trim();
-  if (!key) {
-    return summarizeDescription(source);
+  try {
+    const LanguageModelCtor = (
+      globalThis as typeof globalThis & {
+        LanguageModel?: LocalLanguageModel;
+      }
+    ).LanguageModel;
+
+    if (!LanguageModelCtor?.availability || !LanguageModelCtor?.create) {
+      return null;
+    }
+
+    const availability = await LanguageModelCtor.availability();
+
+    if (
+      availability === "unavailable" ||
+      availability === "no" ||
+      availability === "unsupported"
+    ) {
+      return null;
+    }
+
+    const session = await LanguageModelCtor.create();
+
+    const prompt = [
+      "Resume este error tecnico en espanol para un dashboard operativo.",
+      "Debe ser claro, descriptivo y util.",
+      "Maximo 35 palabras.",
+      "Menciona dependencia, impacto o causa probable si es evidente.",
+      "",
+      source,
+    ].join("\n");
+
+    const output = await session.prompt(prompt);
+    await session.destroy?.();
+
+    const summary = String(output || "").trim();
+    return summary || null;
+  } catch {
+    return null;
   }
+}
+
+async function summarizeDescriptionWithOpenAI(
+  text: string,
+  apiKey?: string,
+  model: IncidentAiModel = "gpt-4.1-nano"
+): Promise<string | null> {
+  const source = String(text || "").trim();
+  const key = String(apiKey || "").trim();
+
+  if (!source || !key) return null;
 
   try {
     const response = await fetch("https://api.openai.com/v1/responses", {
@@ -823,7 +905,7 @@ async function summarizeDescriptionWithAIFrontend(
         Authorization: `Bearer ${key}`,
       },
       body: JSON.stringify({
-        model: "gpt-4.1-nano",
+        model,
         input: [
           {
             role: "system",
@@ -832,7 +914,7 @@ async function summarizeDescriptionWithAIFrontend(
                 type: "input_text",
                 text:
                   "Resume errores tecnicos en espanol para un dashboard operativo. " +
-                  "Debe ser un poco descriptivo, claro y util. Maximo 35 palabras. " +
+                  "Debe ser claro, descriptivo y util. Maximo 35 palabras. " +
                   "Menciona dependencia, impacto o causa probable si es evidente.",
               },
             ],
@@ -854,22 +936,121 @@ async function summarizeDescriptionWithAIFrontend(
     });
 
     if (!response.ok) {
-      const err = await response.json().catch(() => null);
-
-      if (err?.error?.code === "insufficient_quota") {
-        return summarizeDescription(source);
-      }
-
-      throw new Error(err?.error?.message || `HTTP ${response.status}`);
+      return null;
     }
 
     const data = (await response.json()) as { output_text?: string };
     const summary = String(data.output_text || "").trim();
-
-    return summary || summarizeDescription(source);
+    return summary || null;
   } catch {
+    return null;
+  }
+}
+
+async function summarizeDescriptionWithGemini(
+  text: string,
+  apiKey?: string,
+  model: IncidentAiModel = "gemini-2.5-flash-lite"
+): Promise<string | null> {
+  const source = String(text || "").trim();
+  const key = String(apiKey || "").trim();
+
+  if (!source || !key) return null;
+
+  try {
+    const prompt = [
+      "Resume este error tecnico en espanol para un dashboard operativo.",
+      "Debe ser claro, descriptivo y util.",
+      "Maximo 35 palabras.",
+      "Menciona dependencia, impacto o causa probable si es evidente.",
+      "",
+      source,
+    ].join("\n");
+
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
+        key
+      )}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [{ text: prompt }],
+            },
+          ],
+          generationConfig: {
+            temperature: 0.2,
+            maxOutputTokens: 90,
+          },
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const data = (await response.json()) as {
+      candidates?: Array<{
+        content?: {
+          parts?: Array<{ text?: string }>;
+        };
+      }>;
+    };
+
+    const summary = String(
+      data.candidates?.[0]?.content?.parts?.[0]?.text || ""
+    ).trim();
+
+    return summary || null;
+  } catch {
+    return null;
+  }
+}
+
+async function summarizeDescriptionWithAIFrontend(params: {
+  text: string;
+  provider: IncidentAiProvider;
+  model: IncidentAiModel;
+  openAiApiKey?: string;
+  geminiApiKey?: string;
+}): Promise<string> {
+  const { text, provider, model, openAiApiKey, geminiApiKey } = params;
+  const source = String(text || "").trim();
+  if (!source) return "";
+
+  if (provider === "heuristic") {
     return summarizeDescription(source);
   }
+
+  if (provider === "local") {
+    const localSummary = await summarizeDescriptionWithLocalAI(source);
+    return localSummary || summarizeDescription(source);
+  }
+
+  if (provider === "openai") {
+    const openAiSummary = await summarizeDescriptionWithOpenAI(
+      source,
+      openAiApiKey,
+      model
+    );
+    return openAiSummary || summarizeDescription(source);
+  }
+
+  if (provider === "gemini") {
+    const geminiSummary = await summarizeDescriptionWithGemini(
+      source,
+      geminiApiKey,
+      model
+    );
+    return geminiSummary || summarizeDescription(source);
+  }
+
+  return summarizeDescription(source);
 }
 
 async function fetchTopTrx(
@@ -1003,15 +1184,11 @@ async function fetchDescriptionFromLogs(params: {
   };
 }
 
-function cloneDate(date: Date): Date {
-  return new Date(date.getTime());
-}
-
 function buildDailyDates(
   installationDay: Date,
   mode: InstallationRangeMode
 ): Array<{ date: Date; phase: IncidentPhase }> {
-  const base = cloneDate(installationDay);
+  const base = startOfDay(installationDay);
   const dates: Array<{ date: Date; phase: IncidentPhase }> = [];
 
   if (mode === "before") {
@@ -1046,18 +1223,28 @@ export async function fetchIncidentMonitoring(params: {
   installationDay: Date;
   mode: InstallationRangeMode;
   bearerToken?: string;
+  aiProvider?: IncidentAiProvider;
+  aiModel?: IncidentAiModel;
   openAiApiKey?: string;
+  geminiApiKey?: string;
 }): Promise<IncidentMonitoringResult> {
-  const { environment, installationDay, mode, bearerToken, openAiApiKey } = params;
+  const {
+    environment,
+    installationDay,
+    mode,
+    bearerToken,
+    aiProvider = "heuristic",
+    aiModel = "heuristic-summary",
+    openAiApiKey,
+    geminiApiKey,
+  } = params;
 
   const dailyDates = buildDailyDates(installationDay, mode);
 
   const rows = await Promise.all(
-    dailyDates.map(async ({ date, phase }, index) => {
-      const fromDate = new Date(date);
-const toDate = new Date(date);
-toDate.setDate(toDate.getDate() + 1);
-toDate.setMilliseconds(toDate.getMilliseconds() - 1);
+    dailyDates.map(async ({ date, phase }) => {
+      const fromDate = startOfDay(date);
+      const toDate = endOfDay(date);
 
       const trx = await fetchTopTrx(
         environment,
@@ -1069,7 +1256,7 @@ toDate.setMilliseconds(toDate.getMilliseconds() - 1);
       if (!trx) {
         return {
           phase,
-          date: format(date, "dd/MM/yyyy HH:mm"),
+          date: format(date, "dd/MM/yyyy"),
           trx: "",
           exception: "",
           description: "",
@@ -1129,10 +1316,13 @@ toDate.setMilliseconds(toDate.getMilliseconds() - 1);
       ]);
 
       const descriptionReduced = summarizeDescription(descriptionInfo.description);
-      const resumenIA = await summarizeDescriptionWithAIFrontend(
-        descriptionInfo.description,
-        openAiApiKey
-      );
+      const resumenIA = await summarizeDescriptionWithAIFrontend({
+        text: descriptionInfo.description,
+        provider: aiProvider,
+        model: aiModel,
+        openAiApiKey,
+        geminiApiKey,
+      });
 
       const exceptionName =
         extractExceptionName(descriptionInfo.description) ||

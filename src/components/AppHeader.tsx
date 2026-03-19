@@ -12,7 +12,8 @@ import barhcLogo from "@/assets/logo_BArhc_white.png";
 type HeaderRoute =
   | "pipeline"
   | "versionado-entornos"
-  | "versionado-incidentes";
+  | "versionado-incidentes"
+  | "securizacion-live";
 
 const ROUTES: Array<{ value: HeaderRoute; label: string; path: string }> = [
   { value: "pipeline", label: "AWS Monitoreo", path: "/" },
@@ -26,9 +27,18 @@ const ROUTES: Array<{ value: HeaderRoute; label: string; path: string }> = [
     label: "Versionado / Monitoreo de Incidentes",
     path: "/versionado/incidentes",
   },
+  {
+    value: "securizacion-live",
+    label: "Monitoreo Securización LIVE",
+    path: "/monitoreo/securizacion-live",
+  },
 ];
 
 function getRouteValue(pathname: string): HeaderRoute {
+  if (pathname.startsWith("/monitoreo/securizacion-live")) {
+    return "securizacion-live";
+  }
+
   if (pathname.startsWith("/versionado/incidentes")) {
     return "versionado-incidentes";
   }
@@ -64,17 +74,16 @@ export default function AppHeader() {
                 BBVA Monitoring Tool
               </h1>
               <span className="rounded-full border border-primary/20 bg-primary/10 px-3 py-1 text-xs font-semibold text-primary">
-                Dashboard
+                Atenea
               </span>
             </div>
 
-            <p className="text-sm leading-5 text-muted-foreground">
-            </p>
+            <p className="text-sm leading-5 text-muted-foreground"></p>
           </div>
         </div>
 
         <div className="flex items-center gap-4">
-          <div className="w-[260px] sm:w-[320px]">
+          <div className="w-[260px] sm:w-[360px]">
             <Select
               value={currentValue}
               onValueChange={(value) => {

@@ -1,181 +1,109 @@
-// ============================================================
-// URL Builders for MU and RHO
-// ============================================================
 import type {
   AggregateField,
   MetricMethod,
   MetricSetName,
-  NanoTimestamp,
   OperationType,
 } from "@/types/bbva";
 
-const DEFAULT_MU_BASE = "https://mu.live-02.nextgen.igrupobbva";
-const DEFAULT_RHO_BASE = "https://rho.live-02.nextgen.igrupobbva";
+function resolveBaseUrl(baseUrl?: string): string {
+  if (!baseUrl?.trim()) {
+    return `${window.location.origin}/`;
+  }
 
-function ensureQuoted(value: string): string {
-  const trimmed = value.trim();
-  if (trimmed.startsWith('"') && trimmed.endsWith('"')) return trimmed;
-  return `"${trimmed}"`;
+  const trimmed = baseUrl.trim();
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed.endsWith("/") ? trimmed : `${trimmed}/`;
+  }
+
+  const resolved = new URL(trimmed, window.location.origin).toString();
+  return resolved.endsWith("/") ? resolved : `${resolved}/`;
 }
 
-function clean(value: string): string {
-  return String(value ?? "").trim();
+export function buildSiteFilter(site?: string): string | undefined {
+  if (!site?.trim()) return undefined;
+  return `("site" == "${site.trim()}")`;
 }
 
-// -------------------------
-// Query builders
-// -------------------------
-export function buildSiteFilter(site: string): string {
-  return `("site" == "${clean(site)}")`;
+export function buildInvokerTxFilter(invokerTx?: string): string | undefined {
+  if (!invokerTx?.trim()) return undefined;
+  return `("invokerTx" == "${invokerTx.trim()}")`;
 }
 
-export function buildInvokerTxFilter(invokerTx: string): string {
-  return `("invokerTx" == "${clean(invokerTx)}")`;
+export function buildInvokerLibraryFilter(
+  invokerLibrary?: string
+): string | undefined {
+  if (!invokerLibrary?.trim()) return undefined;
+  return `("invokerLibrary" == "${invokerLibrary.trim()}")`;
 }
 
-export function buildInvokerLibraryFilter(invokerLibrary: string): string {
-  return `("invokerLibrary" == "${clean(invokerLibrary)}")`;
-}
-
-export function buildUtilityTypeFilter(utilityType: string): string {
-  return `utilitytype="${clean(utilityType)}"`;
-}
-
-export function buildUtilityTypeOrQuery(types: string[]): string {
-  const valid = types.map(clean).filter(Boolean);
-  if (!valid.length) return "";
-  return `(${valid.map((t) => `utilitytype="${t}"`).join(" or ")})`;
+export function buildUtilityTypeFilter(
+  utilityType?: string
+): string | undefined {
+  if (!utilityType?.trim()) return undefined;
+  return `("utilitytype" == "${utilityType.trim()}")`;
 }
 
 export function buildCompoundQuery(
   ...parts: Array<string | undefined | null | false>
 ): string {
-  return parts
-    .map((part) => (typeof part === "string" ? part.trim() : ""))
-    .filter(Boolean)
-    .join(" AND ");
+  return parts.filter(Boolean).join(" AND ");
 }
 
-export function buildInvokedParamQuery(params: {
-  site?: string;
-  invokerTx: string;
-  invokerLibrary: string;
-  utilityTypes: string[];
-}): string {
-  return buildCompoundQuery(
-    params.site ? buildSiteFilter(params.site) : undefined,
-    buildInvokerTxFilter(params.invokerTx),
-    buildInvokerLibraryFilter(params.invokerLibrary),
-    buildUtilityTypeOrQuery(params.utilityTypes)
-  );
-}
-
-// -------------------------
-// MU builders
-// -------------------------
 export function buildMetricsUrl(params: {
   metricSet: MetricSetName;
   method: MetricMethod;
-  fromTimestamp: NanoTimestamp;
-  toTimestamp: NanoTimestamp;
+  fromTimestamp: string;
+  toTimestamp: string;
   propertiesSize?: number;
-  aggregate: AggregateField;
-  q: string;
+  aggregate?: AggregateField;
+  q?: string;
   operations: OperationType[];
-  baseUrl?: string;
+  baseUrl: string;
+  granularity?: string;
 }): string {
   const {
     metricSet,
     method,
     fromTimestamp,
     toTimestamp,
-    propertiesSize = 20000,
+    propertiesSize,
     aggregate,
     q,
     operations,
-    baseUrl = DEFAULT_MU_BASE,
+    baseUrl,
+    granularity,
   } = params;
 
+  const resolvedBase = resolveBaseUrl(baseUrl);
+
   const url = new URL(
-    `/v0/ns/apx.online/metric-sets/${metricSet}:${method}`,
-    baseUrl
+    `v0/ns/apx.online/metric-sets/${metricSet}:${method}`,
+    resolvedBase
   );
 
   url.searchParams.set("fromTimestamp", fromTimestamp);
   url.searchParams.set("toTimestamp", toTimestamp);
-  url.searchParams.set("propertiesSize", String(propertiesSize));
-  url.searchParams.set("aggregate", ensureQuoted(aggregate));
 
-  if (q.trim()) {
-    url.searchParams.set("q", q);
+  if (typeof propertiesSize === "number") {
+    url.searchParams.set("propertiesSize", String(propertiesSize));
   }
 
-  for (const op of operations) {
-    url.searchParams.append("operation", op);
+  if (aggregate) {
+    url.searchParams.set("aggregate", `"${aggregate}"`);
   }
 
-  return url.toString();
-}
+  if (q?.trim()) {
+    url.searchParams.set("q", q.trim());
+  }
 
-// -------------------------
-// RHO builders
-// -------------------------
-export function buildRhoSpanSearchUrl(params: {
-  invokerTx: string;
-  fromDate: NanoTimestamp;
-  toDate: NanoTimestamp;
-  site?: string;
-  baseUrl?: string;
-}): string {
-  const {
-    invokerTx,
-    fromDate,
-    toDate,
-    site,
-    baseUrl = DEFAULT_RHO_BASE,
-  } = params;
+  if (granularity?.trim()) {
+    url.searchParams.set("granularity", granularity.trim());
+  }
 
-  const q = buildCompoundQuery(
-    site ? buildSiteFilter(site) : undefined,
-    `name == "${clean(invokerTx)}"`
-  );
-
-  const url = new URL("/v1/ns/apx.online/spans", baseUrl);
-  url.searchParams.set("q", q);
-  url.searchParams.set("sort", "ascending");
-  url.searchParams.set("fromDate", fromDate);
-  url.searchParams.set("toDate", toDate);
-  url.searchParams.set(
-    "properties",
-    "channel-code,environ-code,env,product-code,returncode"
-  );
-  url.searchParams.set("profile", "default");
-
-  return url.toString();
-}
-
-export function buildRhoTraceUrl(params: {
-  spanId: string;
-  fromDate: NanoTimestamp;
-  toDate: NanoTimestamp;
-  baseUrl?: string;
-}): string {
-  const {
-    spanId,
-    fromDate,
-    toDate,
-    baseUrl = DEFAULT_RHO_BASE,
-  } = params;
-
-  const url = new URL(
-    `/v1/ns/apx.online/mrs/RhoTraces/spans/${clean(spanId)}:trace`,
-    baseUrl
-  );
-
-  url.searchParams.set("fromDate", fromDate);
-  url.searchParams.set("toDate", toDate);
-  url.searchParams.set("profile", "default");
-  url.searchParams.set("crossRegion", "false");
+  for (const operation of operations) {
+    url.searchParams.append("operation", operation);
+  }
 
   return url.toString();
 }

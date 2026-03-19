@@ -51,19 +51,18 @@ async function fetchAggregation(
   const { from, to } = dateRangeToNano(filters.fromDate, filters.toDate);
 
   const url = buildMetricsUrl({
-    metricSet,
-    method: "listAggregations",
-    fromTimestamp: from,
-    toTimestamp: to,
-    propertiesSize: 20000,
-    aggregate,
-    q,
-    operations,
-  });
+  metricSet,
+  method: "listAggregations",
+  fromTimestamp: from,
+  toTimestamp: to,
+  propertiesSize: 20000,
+  aggregate,
+  q,
+  operations,
+  baseUrl: "/mu-live-02",
+}); 
 
   const headers = buildAuthHeaders(filters.bearerToken);
-
-  console.debug("[MU] Request:", url);
 
   const res = await limiter(() =>
     apiRequest<AggregationResponse & { buckets?: AggregationBucket[] }>(url, {
@@ -210,7 +209,11 @@ export async function fetchFullMetrics(
     );
   }
 
-  if (!baseFilters.iterateAllInvokerTx && baseFilters.limit && baseFilters.limit > 0) {
+  if (
+    !baseFilters.iterateAllInvokerTx &&
+    baseFilters.limit &&
+    baseFilters.limit > 0
+  ) {
     finalTxMetaRows = finalTxMetaRows.slice(0, baseFilters.limit);
   }
 

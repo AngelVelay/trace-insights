@@ -1,7 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
 import { useBearerToken } from "@/hooks/useBearerToken";
-import DateTimePicker from "@/components/DateTimePicker";
 import {
   Eye,
   EyeOff,
@@ -16,6 +14,10 @@ import {
   AlertTriangle,
   Boxes,
   Activity,
+  Brain,
+  Cpu,
+  Sparkles,
+  Bot,
 } from "lucide-react";
 import { format } from "date-fns";
 import {
@@ -54,6 +56,8 @@ import {
   type IncidentMonitoringResult,
   type EnvironmentOption,
   type InstallationRangeMode,
+  type IncidentAiProvider,
+  type IncidentAiModel,
 } from "@/services/versionadoIncidentesService";
 
 const ENVIRONMENTS: EnvironmentOption[] = [
@@ -70,6 +74,26 @@ const RANGE_MODES: Array<{ value: InstallationRangeMode; label: string }> = [
   { value: "after", label: "After" },
   { value: "complete", label: "Completo" },
 ];
+
+const AI_PROVIDER_OPTIONS: Array<{
+  value: IncidentAiProvider;
+  label: string;
+}> = [
+  { value: "heuristic", label: "Resumen heurístico" },
+  { value: "local", label: "Local (Gemini Nano / Prompt API)" },
+  { value: "openai", label: "OpenAI API" },
+  { value: "gemini", label: "Gemini API" },
+];
+
+const OPENAI_MODELS: IncidentAiModel[] = ["gpt-4.1-nano"];
+const GEMINI_MODELS: IncidentAiModel[] = [
+  "gemini-2.5-flash-lite",
+  "gemini-2.5-flash",
+  "gemini-2.0-flash-lite",
+  "gemini-2.0-flash",
+];
+const LOCAL_MODELS: IncidentAiModel[] = ["local-gemini-nano"];
+const HEURISTIC_MODELS: IncidentAiModel[] = ["heuristic-summary"];
 
 type ViewMode = "charts" | "table" | "both";
 
@@ -240,15 +264,70 @@ async function copySvgChartAsImage(container: HTMLDivElement | null) {
   }
 }
 
-function ChartCard({
+function StyledIncidentTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: Array<{ payload: Record<string, unknown> }>;
+}) {
+  if (!active || !payload?.length) return null;
+
+  const point = payload[0].payload;
+
+  return (
+    <div className="max-w-[420px] rounded-2xl border border-slate-700 bg-slate-950/95 p-4 shadow-2xl backdrop-blur">
+      <div className="mb-2 text-sm font-bold text-cyan-300">
+        {String(point.fecha ?? "-")}
+      </div>
+
+      <div className="space-y-1 text-xs text-slate-200">
+        <div>
+          <span className="font-semibold text-slate-400">InvokerTx:</span>{" "}
+          {String(point.trx ?? "-")}
+        </div>
+        <div>
+          <span className="font-semibold text-slate-400">Número de ejecuciones:</span>{" "}
+          {Number(point.numeroEjecuciones ?? 0).toLocaleString()}
+        </div>
+        <div>
+          <span className="font-semibold text-slate-400">Número de errores:</span>{" "}
+          {Number(point.numeroErrores ?? 0).toLocaleString()}
+        </div>
+        <div>
+          <span className="font-semibold text-slate-400">Tiempo de respuesta:</span>{" "}
+          {formatMs(Number(point.numeroTiempoRespuestaMs ?? 0))}
+        </div>
+
+        <div className="pt-2">
+          <span className="font-semibold text-slate-400">Description:</span>
+          <div className="mt-1 whitespace-pre-wrap break-words text-slate-300">
+            {String(point.description ?? "-")}
+          </div>
+        </div>
+
+        <div className="pt-2">
+          <span className="font-semibold text-slate-400">Resumen IA:</span>
+          <div className="mt-1 whitespace-pre-wrap break-words text-emerald-300">
+            {String(point.resumenIA ?? "-")}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function IncidentMetricChart({
   title,
   data,
   dataKey,
+  lineColor,
   chartRef,
 }: {
   title: string;
-  data: Array<Record<string, string | number>>;
+  data: Array<Record<string, unknown>>;
   dataKey: string;
+  lineColor: string;
   chartRef: React.RefObject<HTMLDivElement>;
 }) {
   return (
@@ -276,29 +355,19 @@ function ChartCard({
         </Button>
       </div>
 
-      <div ref={chartRef} className="h-[320px]">
+      <div ref={chartRef} className="h-[290px]">
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data}>
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis dataKey="fecha" tick={{ fontSize: 11 }} />
             <YAxis tick={{ fontSize: 11 }} />
-            <Tooltip
-              contentStyle={{
-                backgroundColor: "hsl(var(--card))",
-                border: "1px solid hsl(var(--border))",
-                borderRadius: "12px",
-              }}
-              labelStyle={{
-                color: "#f59e0b",
-                fontWeight: 700,
-              }}
-            />
+            <Tooltip content={<StyledIncidentTooltip />} />
             <Legend />
             <Line
               type="monotone"
               dataKey={dataKey}
               name={title}
-              stroke="#3b82f6"
+              stroke={lineColor}
               strokeWidth={2.5}
               dot={{ r: 3 }}
               activeDot={{ r: 5 }}
@@ -313,8 +382,13 @@ function ChartCard({
 export default function VersionadoIncidentes() {
   const { bearerToken, setBearerToken } = useBearerToken();
   const [showToken, setShowToken] = useState(false);
+
+  const [aiProvider, setAiProvider] = useState<IncidentAiProvider>("heuristic");
+  const [aiModel, setAiModel] = useState<IncidentAiModel>("heuristic-summary");
   const [openAiApiKey, setOpenAiApiKey] = useState("");
   const [showOpenAiKey, setShowOpenAiKey] = useState(false);
+  const [geminiApiKey, setGeminiApiKey] = useState("");
+  const [showGeminiKey, setShowGeminiKey] = useState(false);
 
   const [environment, setEnvironment] = useState<EnvironmentOption>("INT");
   const [installationDay, setInstallationDay] = useState<Date>(new Date());
@@ -324,33 +398,119 @@ export default function VersionadoIncidentes() {
   const [result, setResult] = useState<IncidentMonitoringResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const execChartRef = useRef<HTMLDivElement>(null);
-  const errorChartRef = useRef<HTMLDivElement>(null);
-  const timeChartRef = useRef<HTMLDivElement>(null);
+  const beforeExecRef = useRef<HTMLDivElement>(null);
+  const beforeErrorRef = useRef<HTMLDivElement>(null);
+  const beforeTimeRef = useRef<HTMLDivElement>(null);
 
-  const navigate = useNavigate();
-const location = useLocation();
+  const installExecRef = useRef<HTMLDivElement>(null);
+  const installErrorRef = useRef<HTMLDivElement>(null);
+  const installTimeRef = useRef<HTMLDivElement>(null);
 
-const currentPage = location.pathname.startsWith("/versionado/incidentes")
-  ? "versionado-incidentes"
-  : location.pathname.startsWith("/versionado/entornos")
-  ? "versionado-entornos"
-  : "pipeline";
+  const afterExecRef = useRef<HTMLDivElement>(null);
+  const afterErrorRef = useRef<HTMLDivElement>(null);
+  const afterTimeRef = useRef<HTMLDivElement>(null);
 
-  const chartData = useMemo(
+  const simpleChartData = useMemo(
     () =>
       (result?.rows ?? []).map((row) => ({
         fecha: row.date,
+        trx: row.trx,
         numeroEjecuciones: row.numeroEjecuciones,
         numeroErrores: row.numeroErrores,
         numeroTiempoRespuestaMs: Number(row.numeroTiempoRespuestaMs.toFixed(2)),
+        description: row.description,
+        resumenIA: row.resumenIA,
       })),
     [result]
   );
 
+  const beforeChartData = useMemo(
+    () =>
+      (result?.rows ?? [])
+        .filter((row) => row.phase === "before")
+        .map((row) => ({
+          fecha: row.date,
+          trx: row.trx,
+          numeroEjecuciones: row.numeroEjecuciones,
+          numeroErrores: row.numeroErrores,
+          numeroTiempoRespuestaMs: Number(row.numeroTiempoRespuestaMs.toFixed(2)),
+          description: row.description,
+          resumenIA: row.resumenIA,
+        })),
+    [result]
+  );
+
+  const installationChartData = useMemo(
+    () =>
+      (result?.rows ?? [])
+        .filter((row) => row.phase === "installation")
+        .map((row) => ({
+          fecha: row.date,
+          trx: row.trx,
+          numeroEjecuciones: row.numeroEjecuciones,
+          numeroErrores: row.numeroErrores,
+          numeroTiempoRespuestaMs: Number(row.numeroTiempoRespuestaMs.toFixed(2)),
+          description: row.description,
+          resumenIA: row.resumenIA,
+        })),
+    [result]
+  );
+
+  const afterChartData = useMemo(
+    () =>
+      (result?.rows ?? [])
+        .filter((row) => row.phase === "after")
+        .map((row) => ({
+          fecha: row.date,
+          trx: row.trx,
+          numeroEjecuciones: row.numeroEjecuciones,
+          numeroErrores: row.numeroErrores,
+          numeroTiempoRespuestaMs: Number(row.numeroTiempoRespuestaMs.toFixed(2)),
+          description: row.description,
+          resumenIA: row.resumenIA,
+        })),
+    [result]
+  );
+
+  const modelOptions = useMemo(() => {
+    if (aiProvider === "openai") return OPENAI_MODELS;
+    if (aiProvider === "gemini") return GEMINI_MODELS;
+    if (aiProvider === "local") return LOCAL_MODELS;
+    return HEURISTIC_MODELS;
+  }, [aiProvider]);
+
+  const handleProviderChange = (provider: IncidentAiProvider) => {
+    setAiProvider(provider);
+
+    if (provider === "openai") {
+      setAiModel("gpt-4.1-nano");
+      return;
+    }
+    if (provider === "gemini") {
+      setAiModel("gemini-2.5-flash-lite");
+      return;
+    }
+    if (provider === "local") {
+      setAiModel("local-gemini-nano");
+      return;
+    }
+
+    setAiModel("heuristic-summary");
+  };
+
   const handleSearch = async () => {
     if (!bearerToken.trim()) {
       toast.error("Bearer Token es requerido.");
+      return;
+    }
+
+    if (aiProvider === "openai" && !openAiApiKey.trim()) {
+      toast.error("Debes capturar la OpenAI API Key.");
+      return;
+    }
+
+    if (aiProvider === "gemini" && !geminiApiKey.trim()) {
+      toast.error("Debes capturar la Gemini API Key.");
       return;
     }
 
@@ -363,7 +523,10 @@ const currentPage = location.pathname.startsWith("/versionado/incidentes")
         installationDay,
         mode: rangeMode,
         bearerToken: bearerToken.trim(),
+        aiProvider,
+        aiModel,
         openAiApiKey: openAiApiKey.trim(),
+        geminiApiKey: geminiApiKey.trim(),
       });
 
       setResult(data);
@@ -417,10 +580,11 @@ const currentPage = location.pathname.startsWith("/versionado/incidentes")
 
   const showCharts = viewMode === "charts" || viewMode === "both";
   const showTable = viewMode === "table" || viewMode === "both";
+  const isComplete = result?.mode === "complete";
 
   return (
     <div className="min-h-screen gradient-mesh">
-   <LoadingOverlay show={loading} />
+      <LoadingOverlay show={loading} />
 
       <main className="mx-auto flex w-full max-w-[1880px] flex-col gap-6 px-6 py-6">
         <section className="rounded-2xl border border-border/70 bg-card/95 p-6 shadow-sm">
@@ -453,29 +617,97 @@ const currentPage = location.pathname.startsWith("/versionado/incidentes")
 
             <div className="space-y-2">
               <Label className="text-xs font-medium text-muted-foreground">
-                OpenAI API Key
+                Proveedor IA
               </Label>
-              <div className="relative">
-                <Input
-                  type={showOpenAiKey ? "text" : "password"}
-                  placeholder="Pega aquí tu OpenAI API Key"
-                  className="h-11 rounded-xl pr-10 font-mono text-xs"
-                  value={openAiApiKey}
-                  onChange={(e) => setOpenAiApiKey(e.target.value)}
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowOpenAiKey((v) => !v)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground"
-                >
-                  {showOpenAiKey ? (
-                    <EyeOff className="h-4 w-4" />
-                  ) : (
-                    <Eye className="h-4 w-4" />
-                  )}
-                </button>
-              </div>
+              <Select value={aiProvider} onValueChange={(value) => handleProviderChange(value as IncidentAiProvider)}>
+                <SelectTrigger className="h-11 rounded-xl font-mono text-xs">
+                  <SelectValue placeholder="Selecciona proveedor IA" />
+                </SelectTrigger>
+                <SelectContent>
+                  {AI_PROVIDER_OPTIONS.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
+          </div>
+
+          <div className="mt-5 grid gap-5 xl:grid-cols-3">
+            <div className="space-y-2">
+              <Label className="text-xs font-medium text-muted-foreground">
+                Modelo IA
+              </Label>
+              <Select value={aiModel} onValueChange={(value) => setAiModel(value as IncidentAiModel)}>
+                <SelectTrigger className="h-11 rounded-xl font-mono text-xs">
+                  <SelectValue placeholder="Selecciona modelo IA" />
+                </SelectTrigger>
+                <SelectContent>
+                  {modelOptions.map((model) => (
+                    <SelectItem key={model} value={model}>
+                      {model}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {aiProvider === "openai" && (
+              <div className="space-y-2 xl:col-span-2">
+                <Label className="text-xs font-medium text-muted-foreground">
+                  OpenAI API Key
+                </Label>
+                <div className="relative">
+                  <Input
+                    type={showOpenAiKey ? "text" : "password"}
+                    placeholder="Captura tu OpenAI API Key"
+                    className="h-11 rounded-xl pr-10 font-mono text-xs"
+                    value={openAiApiKey}
+                    onChange={(e) => setOpenAiApiKey(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowOpenAiKey((v) => !v)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground"
+                  >
+                    {showOpenAiKey ? (
+                      <EyeOff className="h-4 w-4" />
+                    ) : (
+                      <Eye className="h-4 w-4" />
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {aiProvider === "gemini" && (
+              <div className="space-y-2 xl:col-span-2">
+                <Label className="text-xs font-medium text-muted-foreground">
+                  Gemini API Key
+                </Label>
+                <div className="relative">
+                  <Input
+                    type={showGeminiKey ? "text" : "password"}
+                    placeholder="Captura tu Gemini API Key"
+                    className="h-11 rounded-xl pr-10 font-mono text-xs"
+                    value={geminiApiKey}
+                    onChange={(e) => setGeminiApiKey(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowGeminiKey((v) => !v)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground"
+                  >
+                    {showGeminiKey ? (
+                      <EyeOff className="h-4 w-4" />
+                    ) : (
+                      <Eye className="h-4 w-4" />
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="mt-5 grid gap-5 md:grid-cols-3">
@@ -502,30 +734,30 @@ const currentPage = location.pathname.startsWith("/versionado/incidentes")
               <Label className="text-xs font-medium text-muted-foreground">
                 Día de instalación
               </Label>
-            <Popover>
-  <PopoverTrigger asChild>
-    <Button
-      variant="outline"
-      className={cn(
-        "h-11 w-full justify-start rounded-xl font-mono text-xs",
-        !installationDay && "text-muted-foreground"
-      )}
-    >
-      <CalendarIcon className="mr-2 h-4 w-4" />
-      {installationDay
-        ? format(installationDay, "dd/MM/yyyy")
-        : "Selecciona fecha"}
-    </Button>
-  </PopoverTrigger>
-  <PopoverContent className="w-auto rounded-xl p-0" align="start">
-    <Calendar
-      mode="single"
-      selected={installationDay}
-      onSelect={(d) => d && setInstallationDay(d)}
-      initialFocus
-    />
-  </PopoverContent>
-</Popover>
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button
+                    variant="outline"
+                    className={cn(
+                      "h-11 w-full justify-start rounded-xl font-mono text-xs",
+                      !installationDay && "text-muted-foreground"
+                    )}
+                  >
+                    <CalendarIcon className="mr-2 h-4 w-4" />
+                    {installationDay
+                      ? format(installationDay, "dd/MM/yyyy")
+                      : "Selecciona fecha"}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto rounded-xl p-0" align="start">
+                  <Calendar
+                    mode="single"
+                    selected={installationDay}
+                    onSelect={(d) => d && setInstallationDay(d)}
+                    initialFocus
+                  />
+                </PopoverContent>
+              </Popover>
             </div>
 
             <div className="space-y-2">
@@ -620,7 +852,7 @@ const currentPage = location.pathname.startsWith("/versionado/incidentes")
           </div>
         )}
 
-        <section className="grid gap-4 lg:grid-cols-3">
+        <section className="grid gap-4 lg:grid-cols-4">
           <div className="rounded-2xl border border-border/70 bg-card/95 p-5 shadow-sm">
             <div className="flex items-center gap-2">
               <Boxes className="h-4 w-4 text-primary" />
@@ -628,6 +860,48 @@ const currentPage = location.pathname.startsWith("/versionado/incidentes")
             </div>
             <div className="mt-3 break-all font-mono text-xl font-bold">
               {result?.trx || "-"}
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-border/70 bg-card/95 p-5 shadow-sm">
+            <div className="flex items-center gap-2">
+              <Brain className="h-4 w-4 text-violet-500" />
+              <span className="text-xs font-medium text-muted-foreground">Proveedor IA</span>
+            </div>
+            <div className="mt-3 font-mono text-sm font-bold">
+              {aiProvider}
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-border/70 bg-card/95 p-5 shadow-sm">
+            <div className="flex items-center gap-2">
+              <Sparkles className="h-4 w-4 text-amber-500" />
+              <span className="text-xs font-medium text-muted-foreground">Modelo IA</span>
+            </div>
+            <div className="mt-3 break-all font-mono text-sm font-bold">
+              {aiModel}
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-border/70 bg-card/95 p-5 shadow-sm">
+            <div className="flex items-center gap-2">
+              <Bot className="h-4 w-4 text-emerald-500" />
+              <span className="text-xs font-medium text-muted-foreground">Registros</span>
+            </div>
+            <div className="mt-3 font-mono text-3xl font-bold">
+              {result?.rows.length ?? 0}
+            </div>
+          </div>
+        </section>
+
+        <section className="grid gap-4 lg:grid-cols-3">
+          <div className="rounded-2xl border border-border/70 bg-card/95 p-5 shadow-sm">
+            <div className="flex items-center gap-2">
+              <Boxes className="h-4 w-4 text-primary" />
+              <span className="text-xs font-medium text-muted-foreground">Ejecuciones</span>
+            </div>
+            <div className="mt-3 font-mono text-3xl font-bold">
+              {result ? result.totals.numeroEjecuciones.toLocaleString() : "0"}
             </div>
           </div>
 
@@ -654,27 +928,117 @@ const currentPage = location.pathname.startsWith("/versionado/incidentes")
           </div>
         </section>
 
-        {showCharts && chartData.length > 0 && (
-          <section className="grid gap-4 xl:grid-cols-3">
-            <ChartCard
-              title="Número de ejecuciones"
-              data={chartData}
-              dataKey="numeroEjecuciones"
-              chartRef={execChartRef}
-            />
-            <ChartCard
-              title="Número de errores"
-              data={chartData}
-              dataKey="numeroErrores"
-              chartRef={errorChartRef}
-            />
-            <ChartCard
-              title="Tiempo de respuesta (ms)"
-              data={chartData}
-              dataKey="numeroTiempoRespuestaMs"
-              chartRef={timeChartRef}
-            />
-          </section>
+        {showCharts && result && (
+          <>
+            {isComplete ? (
+              <section className="space-y-6">
+                <div>
+                  <h2 className="mb-3 text-sm font-semibold">Before</h2>
+                  <div className="grid gap-4 xl:grid-cols-3">
+                    <IncidentMetricChart
+                      title="Before · Número de ejecuciones"
+                      data={beforeChartData}
+                      dataKey="numeroEjecuciones"
+                      lineColor="#3b82f6"
+                      chartRef={beforeExecRef}
+                    />
+                    <IncidentMetricChart
+                      title="Before · Número de errores"
+                      data={beforeChartData}
+                      dataKey="numeroErrores"
+                      lineColor="#ef4444"
+                      chartRef={beforeErrorRef}
+                    />
+                    <IncidentMetricChart
+                      title="Before · Tiempo de respuesta"
+                      data={beforeChartData}
+                      dataKey="numeroTiempoRespuestaMs"
+                      lineColor="#8b5cf6"
+                      chartRef={beforeTimeRef}
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <h2 className="mb-3 text-sm font-semibold">Día de instalación</h2>
+                  <div className="grid gap-4 xl:grid-cols-3">
+                    <IncidentMetricChart
+                      title="Instalación · Número de ejecuciones"
+                      data={installationChartData}
+                      dataKey="numeroEjecuciones"
+                      lineColor="#f59e0b"
+                      chartRef={installExecRef}
+                    />
+                    <IncidentMetricChart
+                      title="Instalación · Número de errores"
+                      data={installationChartData}
+                      dataKey="numeroErrores"
+                      lineColor="#f97316"
+                      chartRef={installErrorRef}
+                    />
+                    <IncidentMetricChart
+                      title="Instalación · Tiempo de respuesta"
+                      data={installationChartData}
+                      dataKey="numeroTiempoRespuestaMs"
+                      lineColor="#d946ef"
+                      chartRef={installTimeRef}
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <h2 className="mb-3 text-sm font-semibold">After</h2>
+                  <div className="grid gap-4 xl:grid-cols-3">
+                    <IncidentMetricChart
+                      title="After · Número de ejecuciones"
+                      data={afterChartData}
+                      dataKey="numeroEjecuciones"
+                      lineColor="#10b981"
+                      chartRef={afterExecRef}
+                    />
+                    <IncidentMetricChart
+                      title="After · Número de errores"
+                      data={afterChartData}
+                      dataKey="numeroErrores"
+                      lineColor="#22c55e"
+                      chartRef={afterErrorRef}
+                    />
+                    <IncidentMetricChart
+                      title="After · Tiempo de respuesta"
+                      data={afterChartData}
+                      dataKey="numeroTiempoRespuestaMs"
+                      lineColor="#06b6d4"
+                      chartRef={afterTimeRef}
+                    />
+                  </div>
+                </div>
+              </section>
+            ) : (
+              <section className="grid gap-4 xl:grid-cols-3">
+                <IncidentMetricChart
+                  title="Número de ejecuciones"
+                  data={simpleChartData}
+                  dataKey="numeroEjecuciones"
+                  lineColor="#3b82f6"
+                  chartRef={beforeExecRef}
+                />
+                <IncidentMetricChart
+                  title="Número de errores"
+                  data={simpleChartData}
+                  dataKey="numeroErrores"
+                  lineColor="#ef4444"
+                  chartRef={beforeErrorRef}
+                />
+                <IncidentMetricChart
+                  title="Tiempo de respuesta"
+                  data={simpleChartData}
+                  dataKey="numeroTiempoRespuestaMs"
+                  lineColor="#8b5cf6"
+                  chartRef={beforeTimeRef}
+                />
+              </section>
+            )}
+          </>
         )}
 
         {showTable && (
@@ -683,8 +1047,6 @@ const currentPage = location.pathname.startsWith("/versionado/incidentes")
               <h2 className="text-sm font-semibold tracking-tight">
                 Detalle de incidentes
               </h2>
-              <p className="mt-1 text-xs text-muted-foreground">
-              </p>
             </div>
 
             <div className="overflow-auto max-h-[78vh]">
