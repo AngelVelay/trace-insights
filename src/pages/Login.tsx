@@ -4,7 +4,16 @@ import { APP_BRAND, GOOGLE_GIS_CLIENT_ID } from "@/config/authConfig";
 import { useAuth } from "@/context/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { ShieldCheck, Lock, User, Sparkles } from "lucide-react";
+import {
+  ShieldCheck,
+  Lock,
+  User,
+  Loader2,
+  CheckCircle2,
+} from "lucide-react";
+
+import apxLogo from "@/assets/icono_apx.png";
+import barhcLogo from "@/assets/logo_BArhc_white.png";
 
 function loadGoogleScript(): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -19,9 +28,11 @@ function loadGoogleScript(): Promise<void> {
       }
 
       existing.addEventListener("load", () => resolve(), { once: true });
-      existing.addEventListener("error", () => reject(new Error("No se pudo cargar GIS.")), {
-        once: true,
-      });
+      existing.addEventListener(
+        "error",
+        () => reject(new Error("No se pudo cargar GIS.")),
+        { once: true }
+      );
       return;
     }
 
@@ -35,6 +46,10 @@ function loadGoogleScript(): Promise<void> {
   });
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export default function LoginPage() {
   const navigate = useNavigate();
   const { loginWithGoogleCredential, loginWithCredentials } = useAuth();
@@ -45,6 +60,7 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState<"google" | "local" | null>(null);
   const [error, setError] = useState("");
+  const [loginSuccess, setLoginSuccess] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -65,7 +81,12 @@ export default function LoginPage() {
             try {
               setSubmitting("google");
               setError("");
+              setLoginSuccess(false);
+
               await loginWithGoogleCredential(response.credential);
+              setLoginSuccess(true);
+              await sleep(1100);
+
               navigate("/", { replace: true });
             } catch (err) {
               setError(
@@ -108,9 +129,13 @@ export default function LoginPage() {
     e.preventDefault();
     setError("");
     setSubmitting("local");
+    setLoginSuccess(false);
 
     try {
       await loginWithCredentials(username, password);
+      setLoginSuccess(true);
+      await sleep(1100);
+
       navigate("/", { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo iniciar sesión.");
@@ -119,15 +144,50 @@ export default function LoginPage() {
     }
   };
 
-  const isDisabled = Boolean(submitting);
+  const isDisabled = Boolean(submitting) || loginSuccess;
+  const showOverlay = Boolean(submitting) || loginSuccess;
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-slate-950">
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(6,182,212,0.18),transparent_30%),radial-gradient(circle_at_bottom_right,rgba(16,185,129,0.18),transparent_30%)]" />
       <div className="absolute inset-0 opacity-20 [background-image:linear-gradient(rgba(255,255,255,0.06)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.06)_1px,transparent_1px)] [background-size:32px_32px]" />
 
+      {showOverlay ? (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-950/75 backdrop-blur-md">
+          <div className="w-full max-w-sm rounded-3xl border border-slate-800 bg-slate-900/95 px-8 py-7 shadow-2xl">
+            <div className="flex flex-col items-center gap-4 text-center">
+              <div className="relative">
+                <div className="absolute inset-0 rounded-full bg-cyan-400/20 blur-xl" />
+                {loginSuccess ? (
+                  <CheckCircle2 className="relative h-14 w-14 text-emerald-400" />
+                ) : (
+                  <Loader2 className="relative h-14 w-14 animate-spin text-cyan-400" />
+                )}
+              </div>
+
+              <div className="space-y-1">
+                <h3 className="text-lg font-semibold text-white">
+                  {loginSuccess ? "Acceso concedido" : "Validando acceso"}
+                </h3>
+                <p className="text-sm text-slate-400">
+                  {loginSuccess
+                    ? "Entrando al dashboard..."
+                    : submitting === "google"
+                    ? "Iniciando sesión con Google..."
+                    : "Validando credenciales internas..."}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div className="relative z-10 flex min-h-screen items-center justify-center px-4 py-10">
-        <div className="grid w-full max-w-6xl overflow-hidden rounded-3xl border border-slate-800 bg-slate-900/80 shadow-2xl backdrop-blur xl:grid-cols-[1.1fr_0.9fr]">
+        <div
+          className={`grid w-full max-w-6xl overflow-hidden rounded-3xl border border-slate-800 bg-slate-900/80 shadow-2xl backdrop-blur transition-all duration-700 xl:grid-cols-[1.1fr_0.9fr] ${
+            loginSuccess ? "scale-[0.985] opacity-90" : "scale-100 opacity-100"
+          }`}
+        >
           <div className="relative hidden min-h-[680px] overflow-hidden xl:block">
             <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/25 via-slate-900 to-emerald-500/20" />
             <div className="absolute -left-16 top-10 h-56 w-56 rounded-full bg-cyan-400/20 blur-3xl" />
@@ -149,39 +209,49 @@ export default function LoginPage() {
                 </p>
               </div>
 
-              <div className="space-y-4">
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-5 transition duration-300 hover:translate-y-[-2px] hover:bg-white/[0.07]">
-                  <div className="mb-2 flex items-center gap-2 text-cyan-300">
-                    <Sparkles className="h-4 w-4" />
-                    Login dual
-                  </div>
-                  <p className="text-sm text-slate-300">
-                    Accede con Google Identity Services o con credenciales internas configuradas en código.
-                  </p>
-                </div>
+              <div className="space-y-5">
+                <div className="rounded-3xl border border-white/10 bg-white/5 p-7 shadow-xl backdrop-blur-sm transition-transform duration-500 hover:-translate-y-1">
+                  <div className="flex items-center justify-between gap-6">
+                    <div className="flex h-24 w-24 items-center justify-center rounded-3xl bg-white shadow-lg ring-1 ring-white/20">
+                      <img
+                        src={apxLogo}
+                        alt="APX"
+                        className="h-16 w-16 object-contain"
+                      />
+                    </div>
 
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-5 transition duration-300 hover:translate-y-[-2px] hover:bg-white/[0.07]">
-                  <div className="mb-2 flex items-center gap-2 text-emerald-300">
-                    <ShieldCheck className="h-4 w-4" />
-                    Perfil visible
+                    <div className="flex flex-1 justify-end">
+                      <div className="rounded-3xl bg-slate-950 px-6 py-5 shadow-lg ring-1 ring-white/10">
+                        <img
+                          src={barhcLogo}
+                          alt="BArhc"
+                          className="h-16 w-auto object-contain"
+                        />
+                      </div>
+                    </div>
                   </div>
-                  <p className="text-sm text-slate-300">
-                    Si entras con Google se mostrará tu nombre, correo y foto dentro de la app.
-                  </p>
+
+                  <div className="mt-6 rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3 text-sm text-slate-300">
+                    Plataforma de monitoreo hecho por Arquitectura Local Mexico.
+                  </div>
                 </div>
               </div>
             </div>
           </div>
 
           <div className="flex min-h-[680px] items-center justify-center bg-slate-950/60 p-6 sm:p-10">
-            <div className="w-full max-w-md">
+            <div
+              className={`w-full max-w-md transition-all duration-700 ${
+                loginSuccess ? "translate-y-2 scale-[0.98] opacity-80" : "translate-y-0 scale-100 opacity-100"
+              }`}
+            >
               <div className="mb-8 text-center xl:text-left">
                 <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-cyan-400 to-emerald-400 shadow-lg xl:mx-0">
                   <ShieldCheck className="h-8 w-8 text-slate-950" />
                 </div>
                 <h2 className="text-3xl font-bold text-white">Iniciar sesión</h2>
                 <p className="mt-2 text-sm text-slate-400">
-                  Accede a tu entorno de monitoreo de forma segura
+                  
                 </p>
               </div>
 
@@ -211,6 +281,7 @@ export default function LoginPage() {
                         onChange={(e) => setUsername(e.target.value)}
                         placeholder="Ingresa tu usuario"
                         className="h-12 rounded-xl border-slate-800 bg-slate-900 pl-10 text-white placeholder:text-slate-500"
+                        disabled={isDisabled}
                       />
                     </div>
                   </div>
@@ -225,6 +296,7 @@ export default function LoginPage() {
                         onChange={(e) => setPassword(e.target.value)}
                         placeholder="Ingresa tu contraseña"
                         className="h-12 rounded-xl border-slate-800 bg-slate-900 pl-10 text-white placeholder:text-slate-500"
+                        disabled={isDisabled}
                       />
                     </div>
                   </div>
@@ -246,7 +318,7 @@ export default function LoginPage() {
               </div>
 
               <p className="mt-6 text-center text-xs text-slate-500 xl:text-left">
-                Acceso protegido para operación y monitoreo.
+                Acceso protegido para usuarios autorizados. Si tienes problemas para iniciar sesión, contacta al administrador.
               </p>
             </div>
           </div>

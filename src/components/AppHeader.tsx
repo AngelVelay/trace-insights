@@ -6,6 +6,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Button } from "@/components/ui/button";
+import { LogOut } from "lucide-react";
+import { useAuth } from "@/context/AuthContext";
+
 import apxLogo from "@/assets/icono_apx.png";
 import barhcLogo from "@/assets/logo_BArhc_white.png";
 
@@ -53,8 +57,18 @@ function getRouteValue(pathname: string): HeaderRoute {
 export default function AppHeader() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { user, logout } = useAuth();
 
   const currentValue = getRouteValue(location.pathname);
+
+  const handleLogout = async () => {
+    await logout();
+    navigate("/login", { replace: true });
+  };
+
+  const displayName = user?.name || "Usuario";
+  const displayEmail = user?.email || "";
+  const displayInitial = displayName.charAt(0).toUpperCase();
 
   return (
     <header className="sticky top-0 z-50 border-b border-border/60 bg-background/85 backdrop-blur-xl shadow-sm">
@@ -78,7 +92,7 @@ export default function AppHeader() {
               </span>
             </div>
 
-            <p className="text-sm leading-5 text-muted-foreground"></p>
+            <p className="text-sm leading-5 text-muted-foreground" />
           </div>
         </div>
 
@@ -105,6 +119,40 @@ export default function AppHeader() {
               </SelectContent>
             </Select>
           </div>
+
+          {user ? (
+            <div className="hidden items-center gap-3 lg:flex">
+              <div className="text-right">
+                <div className="text-sm font-semibold text-foreground">
+                  {displayName}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {displayEmail}
+                </div>
+              </div>
+
+              {user.photoUrl ? (
+                <img
+                  src={user.photoUrl}
+                  alt={displayName}
+                  className="h-10 w-10 rounded-full border border-border object-cover"
+                />
+              ) : (
+                <div className="flex h-10 w-10 items-center justify-center rounded-full border border-border bg-muted text-sm font-bold text-foreground">
+                  {displayInitial}
+                </div>
+              )}
+
+              <Button
+                variant="outline"
+                onClick={handleLogout}
+                className="rounded-xl"
+              >
+                <LogOut className="mr-2 h-4 w-4" />
+                Cerrar sesión
+              </Button>
+            </div>
+          ) : null}
 
           <div className="hidden shrink-0 items-center md:flex">
             <div className="rounded-2xl bg-slate-900 px-4 py-3 shadow-sm ring-1 ring-border/40">

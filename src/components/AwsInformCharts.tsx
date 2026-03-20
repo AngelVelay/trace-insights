@@ -234,6 +234,11 @@ const totalLive04Executions = useMemo(
   [filteredRows]
 );
 
+const totalLive02Executions = useMemo(
+  () => filteredRows.reduce((sum, row) => sum + row.live02.executions, 0),
+  [filteredRows]
+);
+
 const live02ExecutionsValue = useMemo(() => {
   const cleaned = String(live02ExecutionsInput)
     .replace(/,/g, "")
@@ -261,9 +266,13 @@ const totalAwsEnabled = useMemo(() => {
 
 // Total ejecuciones LIVE-02 / Total AWS * 100
 const live02VsAwsPercent = useMemo(() => {
-  if (!totalAwsEnabled) return 0;
-  return (live02ExecutionsValue / totalAwsEnabled) * 100;
-}, [live02ExecutionsValue, totalAwsEnabled]);
+  if (!live02ExecutionsValue) return 0;
+  return (
+    ((totalLive04Executions * (awsPowerOnPercent / 100)) /
+      live02ExecutionsValue) *
+    100
+  );
+}, [totalLive04Executions, awsPowerOnPercent, live02ExecutionsValue]);
 
   const chartData = useMemo(() => {
     return filteredRows.map((row) => ({
@@ -329,10 +338,7 @@ const live02VsAwsPercent = useMemo(() => {
     <div className="space-y-6">
       <section className="grid gap-4 lg:grid-cols-4">
         <div className="rounded-2xl border border-border/70 bg-card/95 p-5 shadow-sm">
-  <div className="mb-3 text-xs text-muted-foreground">InvokerTx analizados</div>
-  <div className="font-mono text-3xl font-bold">
-    {filteredRows.length.toLocaleString()}
-  </div>
+  <div className="mb-3 text-xs text-muted-foreground">Calculadora porcentaje de ejecuciones AWS</div>
 
   <div className="mt-5 space-y-3">
     <div>
@@ -385,7 +391,7 @@ const live02VsAwsPercent = useMemo(() => {
         <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/5 p-5 shadow-sm">
           <div className="text-xs text-cyan-300">Ejecuciones LIVE-02</div>
           <div className="mt-3 font-mono text-3xl font-bold">
-            {live02ExecutionsValue.toLocaleString()}
+            {totalLive02Executions.toLocaleString()}
           </div>
         </div>
 
@@ -621,7 +627,7 @@ const live02VsAwsPercent = useMemo(() => {
                       LIVE-02 Errors
                     </th>
                     <th className="bg-cyan-500/10 px-4 py-4 text-xs font-semibold uppercase tracking-wide text-cyan-300">
-                      LIVE-02 Jumps
+                      LIVE-02 Saltos
                     </th>
                     <th className="bg-cyan-500/10 px-4 py-4 text-xs font-semibold uppercase tracking-wide text-cyan-300">
                       LIVE-02 Resp
@@ -634,24 +640,12 @@ const live02VsAwsPercent = useMemo(() => {
                       LIVE-04 Errors
                     </th>
                     <th className="bg-emerald-500/10 px-4 py-4 text-xs font-semibold uppercase tracking-wide text-emerald-300">
-                      LIVE-04 Jumps
+                      LIVE-04 Saltos
                     </th>
                     <th className="bg-emerald-500/10 px-4 py-4 text-xs font-semibold uppercase tracking-wide text-emerald-300">
                       LIVE-04 Resp
                     </th>
 
-                    <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                      Δ Exec
-                    </th>
-                    <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                      Δ Errors
-                    </th>
-                    <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                      Δ Jumps
-                    </th>
-                    <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                      Δ Resp
-                    </th>
                   </tr>
                 </thead>
 
@@ -688,11 +682,6 @@ const live02VsAwsPercent = useMemo(() => {
                       <td className="bg-emerald-500/5 px-4 py-4 font-mono">
                         {formatMs(row.live04.meanDurationMs)}
                       </td>
-
-                      <td className="px-4 py-4 font-mono">{row.deltaExecutions.toLocaleString()}</td>
-                      <td className="px-4 py-4 font-mono">{row.deltaTechnicalErrors.toLocaleString()}</td>
-                      <td className="px-4 py-4 font-mono">{row.deltaJumps.toLocaleString()}</td>
-                      <td className="px-4 py-4 font-mono">{formatMs(row.deltaMeanDurationMs)}</td>
                     </tr>
                   ))}
                 </tbody>

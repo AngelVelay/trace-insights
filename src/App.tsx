@@ -1,33 +1,83 @@
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
-import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { Toaster as Sonner } from "@/components/ui/sonner";
+
+import { AuthProvider, useAuth } from "@/context/AuthContext";
+import ProtectedRoute from "@/components/auth/ProtectedRoute";
+
 import AppHeader from "@/components/AppHeader";
-import Dashboard from "./pages/Dashboard";
-import VersionadoEntornos from "./pages/VersionadoEntornos";
-import VersionadoIncidentes from "./pages/VersionadoIncidentes";
-import MonitoreoSecurizacionLive from "./pages/MonitoreoSecurizacionLive";
-import NotFound from "./pages/NotFound";
+import Dashboard from "@/pages/Dashboard";
+import LoginPage from "@/pages/Login";
+import VersionadoEntornos from "@/pages/VersionadoEntornos";
+import VersionadoIncidentes from "@/pages/VersionadoIncidentes";
+import MonitoreoSecurizacionLive from "@/pages/MonitoreoSecurizacionLive";
+import NotFound from "@/pages/NotFound";
 
 const queryClient = new QueryClient();
+
+function AppShell() {
+  const { user } = useAuth();
+
+  return (
+    <BrowserRouter>
+      {user ? <AppHeader /> : null}
+
+      <Routes>
+        <Route
+          path="/login"
+          element={user ? <Navigate to="/" replace /> : <LoginPage />}
+        />
+
+        <Route
+          path="/"
+          element={
+            <ProtectedRoute>
+              <Dashboard />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/versionado/entornos"
+          element={
+            <ProtectedRoute>
+              <VersionadoEntornos />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/versionado/incidentes"
+          element={
+            <ProtectedRoute>
+              <VersionadoIncidentes />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/monitoreo/securizacion-live"
+          element={
+            <ProtectedRoute>
+              <MonitoreoSecurizacionLive />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route path="*" element={<NotFound />} />
+      </Routes>
+    </BrowserRouter>
+  );
+}
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>
       <Sonner />
-      <BrowserRouter>
-        <AppHeader />
-        <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/versionado/entornos" element={<VersionadoEntornos />} />
-          <Route path="/versionado/incidentes" element={<VersionadoIncidentes />} />
-          <Route
-            path="/monitoreo/securizacion-live"
-            element={<MonitoreoSecurizacionLive />}
-          />
-          <Route path="*" element={<NotFound />} />
-        </Routes>
-      </BrowserRouter>
+      <AuthProvider>
+        <AppShell />
+      </AuthProvider>
     </TooltipProvider>
   </QueryClientProvider>
 );

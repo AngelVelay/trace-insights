@@ -446,15 +446,6 @@ export default function Dashboard() {
         </Label>
         <DateTimePicker value={awsInformToDate} onChange={setAwsInformToDate} />
       </div>
-
-      <div className="space-y-2">
-        <Label className="text-xs font-medium text-muted-foreground">
-          Token compartido
-        </Label>
-        <div className="flex h-11 items-center rounded-xl border border-border bg-muted/30 px-3 text-xs text-muted-foreground">
-          Se usa el Bearer Token capturado arriba en el filtro principal.
-        </div>
-      </div>
     </div>
 
     <div className="mt-6 flex flex-wrap gap-3">

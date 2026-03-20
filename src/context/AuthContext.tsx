@@ -84,8 +84,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       const localUser: AppUser = {
         id: "local-admin",
-        name: "Administrador GLOMO",
-        email: `${DEMO_LOGIN.username}@local.glomo`,
+        name: "Arquitectura APX",
+        email: `${DEMO_LOGIN.username}@local`,
         method: "local",
       };
 
