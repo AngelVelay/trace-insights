@@ -22,6 +22,7 @@ import {
 import { fetchTraceSummaryForInvokerTx } from "./tracesService";
 
 const limiter = createConcurrencyLimiter(5);
+const awsInformLimiter = createConcurrencyLimiter(2);
 
 type InvokerTxBucket = AggregationBucket & {
   bucket?: AggregationBucket["bucket"] & {
@@ -34,6 +35,44 @@ type InvokerTxBucket = AggregationBucket & {
     sum_technical_error?: number;
   };
 };
+
+export type AwsInformSiteName = "LIVE-02" | "LIVE-04";
+
+export interface AwsInformSiteMetrics {
+  site: AwsInformSiteName;
+  invokerTx: string;
+  executions: number;
+  technicalErrors: number;
+  functionalErrors: number;
+  meanDurationMs: number;
+  jumps: number;
+  trace: string;
+}
+
+export interface AwsInformComparisonRow {
+  invokerTx: string;
+  live02: AwsInformSiteMetrics;
+  live04: AwsInformSiteMetrics;
+  deltaExecutions: number;
+  deltaTechnicalErrors: number;
+  deltaMeanDurationMs: number;
+  deltaJumps: number;
+}
+
+export interface AwsInformComparisonResult {
+  rows: AwsInformComparisonRow[];
+  summary: {
+    totalInvokerTx: number;
+    totalExecutionsLive02: number;
+    totalExecutionsLive04: number;
+    totalErrorsLive02: number;
+    totalErrorsLive04: number;
+    totalJumpsLive02: number;
+    totalJumpsLive04: number;
+    avgDurationLive02: number;
+    avgDurationLive04: number;
+  };
+}
 
 function extractBuckets(
   res: AggregationResponse & { buckets?: AggregationBucket[] }
@@ -51,16 +90,16 @@ async function fetchAggregation(
   const { from, to } = dateRangeToNano(filters.fromDate, filters.toDate);
 
   const url = buildMetricsUrl({
-  metricSet,
-  method: "listAggregations",
-  fromTimestamp: from,
-  toTimestamp: to,
-  propertiesSize: 20000,
-  aggregate,
-  q,
-  operations,
-  baseUrl: "/mu-live-02",
-}); 
+    metricSet,
+    method: "listAggregations",
+    fromTimestamp: from,
+    toTimestamp: to,
+    propertiesSize: 20000,
+    aggregate,
+    q,
+    operations,
+    baseUrl: "/mu-live-02",
+  });
 
   const headers = buildAuthHeaders(filters.bearerToken);
 
@@ -169,6 +208,206 @@ export async function fetchInvokerTxList(
   return buckets
     .map((b) => b.bucket?.name ?? "")
     .filter((v): v is string => Boolean(v?.trim()));
+}
+
+function parseTraceJumps(trace: string): number {
+  const match = String(trace ?? "").match(/Total de saltos encontrados:\s*(\d+)/i);
+  return match ? Number(match[1]) : 0;
+}
+
+function emptyAwsSiteMetrics(
+  site: AwsInformSiteName,
+  invokerTx: string,
+  trace = "-"
+): AwsInformSiteMetrics {
+  return {
+    site,
+    invokerTx,
+    executions: 0,
+    technicalErrors: 0,
+    functionalErrors: 0,
+    meanDurationMs: 0,
+    jumps: 0,
+    trace,
+  };
+}
+
+async function fetchAwsSiteMetricsForInvokerTx(
+  baseFilters: MetricsFilters,
+  site: AwsInformSiteName,
+  invokerTx: string
+): Promise<AwsInformSiteMetrics> {
+  const scopedFilters: MetricsFilters = {
+    ...baseFilters,
+    site,
+    invokerTx,
+    limit: 1,
+    iterateAllInvokerTx: true,
+  };
+
+  try {
+    const buckets = await fetchInvokerTxBuckets(scopedFilters);
+    const bucket = buckets.find(
+      (item) => String(item.bucket?.name ?? "").trim() === invokerTx
+    );
+
+    if (!bucket) {
+      return emptyAwsSiteMetrics(site, invokerTx);
+    }
+
+    let trace = "-";
+    try {
+      trace = await fetchTraceSummaryForInvokerTx(scopedFilters, invokerTx);
+    } catch {
+      trace = "-";
+    }
+
+    return {
+      site,
+      invokerTx,
+      executions: Number(bucket.values?.sum_num_executions ?? 0),
+      technicalErrors: Number(bucket.values?.sum_technical_error ?? 0),
+      functionalErrors: Number(bucket.values?.sum_functional_error ?? 0),
+      meanDurationMs: Number(bucket.values?.mean_span_duration ?? 0),
+      jumps: parseTraceJumps(trace),
+      trace,
+    };
+  } catch (error) {
+    const message =
+      error instanceof Error ? `Error consultando ${site}: ${error.message}` : `Error consultando ${site}`;
+    return emptyAwsSiteMetrics(site, invokerTx, message);
+  }
+}
+
+export async function fetchAwsInformComparison(params: {
+  invokerTxList: string[];
+  fromDate: Date;
+  toDate: Date;
+  bearerToken?: string;
+  onProgress?: (message: string) => void;
+  onProgressValue?: (value: number) => void;
+}): Promise<AwsInformComparisonResult> {
+  const {
+    invokerTxList,
+    fromDate,
+    toDate,
+    bearerToken,
+    onProgress,
+    onProgressValue,
+  } = params;
+
+  const uniqueInvokerTx = Array.from(
+    new Set(
+      invokerTxList
+        .map((item) => item.trim().toUpperCase())
+        .filter(Boolean)
+    )
+  );
+
+  if (!uniqueInvokerTx.length) {
+    return {
+      rows: [],
+      summary: {
+        totalInvokerTx: 0,
+        totalExecutionsLive02: 0,
+        totalExecutionsLive04: 0,
+        totalErrorsLive02: 0,
+        totalErrorsLive04: 0,
+        totalJumpsLive02: 0,
+        totalJumpsLive04: 0,
+        avgDurationLive02: 0,
+        avgDurationLive04: 0,
+      },
+    };
+  }
+
+  const baseFilters: MetricsFilters = {
+    fromDate,
+    toDate,
+    bearerToken,
+    searchMode: "pipeline",
+    iterateAllInvokerTx: true,
+  };
+
+  const totalTasks = uniqueInvokerTx.length * 2;
+  let doneTasks = 0;
+
+  const advanceProgress = (message: string) => {
+    doneTasks += 1;
+    onProgress?.(message);
+    onProgressValue?.(Math.max(1, Math.min(100, Math.round((doneTasks / totalTasks) * 100))));
+  };
+
+  onProgress?.("Preparando informe AWS...");
+  onProgressValue?.(3);
+
+  const rows = await Promise.all(
+    uniqueInvokerTx.map(async (invokerTx) => {
+      const [live02, live04] = await Promise.all([
+        awsInformLimiter(async () => {
+          const data = await fetchAwsSiteMetricsForInvokerTx(baseFilters, "LIVE-02", invokerTx);
+          advanceProgress(`${invokerTx} · LIVE-02 listo`);
+          return data;
+        }),
+        awsInformLimiter(async () => {
+          const data = await fetchAwsSiteMetricsForInvokerTx(baseFilters, "LIVE-04", invokerTx);
+          advanceProgress(`${invokerTx} · LIVE-04 listo`);
+          return data;
+        }),
+      ]);
+
+      return {
+        invokerTx,
+        live02,
+        live04,
+        deltaExecutions: live04.executions - live02.executions,
+        deltaTechnicalErrors: live04.technicalErrors - live02.technicalErrors,
+        deltaMeanDurationMs: live04.meanDurationMs - live02.meanDurationMs,
+        deltaJumps: live04.jumps - live02.jumps,
+      } satisfies AwsInformComparisonRow;
+    })
+  );
+
+  rows.sort((a, b) => {
+    const totalA = a.live02.executions + a.live04.executions;
+    const totalB = b.live02.executions + b.live04.executions;
+    return totalB - totalA;
+  });
+
+  const totalExecutionsLive02 = rows.reduce((sum, row) => sum + row.live02.executions, 0);
+  const totalExecutionsLive04 = rows.reduce((sum, row) => sum + row.live04.executions, 0);
+  const totalErrorsLive02 = rows.reduce((sum, row) => sum + row.live02.technicalErrors, 0);
+  const totalErrorsLive04 = rows.reduce((sum, row) => sum + row.live04.technicalErrors, 0);
+  const totalJumpsLive02 = rows.reduce((sum, row) => sum + row.live02.jumps, 0);
+  const totalJumpsLive04 = rows.reduce((sum, row) => sum + row.live04.jumps, 0);
+
+  const avgDurationLive02 =
+    rows.length > 0
+      ? rows.reduce((sum, row) => sum + row.live02.meanDurationMs, 0) / rows.length
+      : 0;
+
+  const avgDurationLive04 =
+    rows.length > 0
+      ? rows.reduce((sum, row) => sum + row.live04.meanDurationMs, 0) / rows.length
+      : 0;
+
+  onProgress?.("Informe AWS generado");
+  onProgressValue?.(100);
+
+  return {
+    rows,
+    summary: {
+      totalInvokerTx: rows.length,
+      totalExecutionsLive02,
+      totalExecutionsLive04,
+      totalErrorsLive02,
+      totalErrorsLive04,
+      totalJumpsLive02,
+      totalJumpsLive04,
+      avgDurationLive02,
+      avgDurationLive04,
+    },
+  };
 }
 
 export async function fetchFullMetrics(
