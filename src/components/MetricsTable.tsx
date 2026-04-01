@@ -293,6 +293,16 @@ function renderInvokerTxCell(
   );
 }
 
+function renderSimpleInvokerTxCell(value: unknown) {
+  const item = parseInvokerTxItem(value);
+
+  if (!item) {
+    return <span className="text-muted-foreground">-</span>;
+  }
+
+  return <div className="font-bold text-foreground">{item.invokerTx}</div>;
+}
+
 function renderLibraryCell(value: unknown) {
   const items = parseLibraryItems(value);
 
@@ -474,6 +484,9 @@ export default function MetricsTable({
             <TableRow>
               <SortableHead label="Site" field="site" />
               <SortableHead label="InvokerTx" field="invokerTx" />
+              <TableHead className="whitespace-nowrap text-xs">
+                InvokerTx simple
+              </TableHead>
               <SortableHead label="Library" field="invokerLibrary" />
               <SortableHead label="UtilityType" field="utilitytype" />
               <SortableHead label="InvokedParam" field="invokedparam" />
@@ -485,7 +498,7 @@ export default function MetricsTable({
             {filtered.length === 0 ? (
               <TableRow>
                 <TableCell
-                  colSpan={6}
+                  colSpan={7}
                   className="py-8 text-center text-muted-foreground"
                 >
                   {emptyStateMessage}
@@ -502,6 +515,7 @@ export default function MetricsTable({
                       onSelectInvokerTx
                     )}
                   </TableCell>
+                  <TableCell>{renderSimpleInvokerTxCell(row.invokerTx)}</TableCell>
                   <TableCell>{renderLibraryCell(row.invokerLibrary)}</TableCell>
                   <TableCell>{renderUtilityTypeCell(row.utilitytype)}</TableCell>
                   <TableCell>{renderInvokedParamCell(row.invokedparam)}</TableCell>

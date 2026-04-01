@@ -98,7 +98,7 @@ async function fetchAggregation(
     aggregate,
     q,
     operations,
-    baseUrl: "/mu-live-02",
+    baseUrl: "https://mu.live-02.nextgen.igrupobbva"
   });
 
   const headers = buildAuthHeaders(filters.bearerToken);

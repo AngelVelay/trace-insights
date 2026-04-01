@@ -19,6 +19,7 @@ import {
 interface MetricsChartsProps {
   rows: MetricRow[];
   selectedInvokerTx?: string | null;
+  onCompareInvokerTx?: (invokerTx: string) => void;
 }
 
 type InvokerTxItem = {
@@ -115,6 +116,7 @@ function parseInvokedParamItems(value: unknown): InvokedParamItem[] {
 export default function MetricsCharts({
   rows,
   selectedInvokerTx,
+  onCompareInvokerTx,
 }: MetricsChartsProps) {
   const scopedRows = useMemo(() => {
     if (!selectedInvokerTx) return rows;
@@ -240,6 +242,13 @@ export default function MetricsCharts({
       .slice(0, 10);
   }, [scopedRows]);
 
+  const handleInvokerBarClick = (data: { name?: string } | undefined) => {
+    const invokerTx = String(data?.name ?? "").trim();
+    if (invokerTx) {
+      onCompareInvokerTx?.(invokerTx);
+    }
+  };
+
   if (scopedRows.length === 0) {
     return (
       <div className="rounded-lg border border-border bg-card p-8 text-center text-muted-foreground">
@@ -265,7 +274,7 @@ export default function MetricsCharts({
       <div className="text-xs text-muted-foreground">
         {selectedInvokerTx
           ? `Gráficas filtradas por invokerTx: ${selectedInvokerTx}`
-          : "Vista general. Haz click en un invokerTx para enfocar gráficas y KPIs."}
+          : "Vista general. Haz click en un invokerTx para enfocar gráficas, KPIs y generar el comparativo LIVE-02 vs LIVE-04."}
       </div>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -312,10 +321,26 @@ export default function MetricsCharts({
               />
               <Tooltip {...tooltipStyle} />
               <Legend wrapperStyle={{ fontSize: 11 }} />
-              <Bar dataKey="ejecuciones" fill="hsl(199, 89%, 48%)" name="Ejecuciones" />
-              <Bar dataKey="errores" fill="hsl(0, 72%, 51%)" name="Errores" />
+              <Bar
+                dataKey="ejecuciones"
+                fill="hsl(199, 89%, 48%)"
+                name="Ejecuciones"
+                cursor="pointer"
+                onClick={(data) => handleInvokerBarClick(data as { name?: string })}
+              />
+              <Bar
+                dataKey="errores"
+                fill="hsl(0, 72%, 51%)"
+                name="Errores"
+                cursor="pointer"
+                onClick={(data) => handleInvokerBarClick(data as { name?: string })}
+              />
             </BarChart>
           </ResponsiveContainer>
+
+          <p className="mt-2 text-[11px] text-muted-foreground">
+            Haz click sobre una barra para generar el comparativo LIVE-02 vs LIVE-04 del invokerTx.
+          </p>
         </div>
       </div>
 

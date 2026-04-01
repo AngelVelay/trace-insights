@@ -1,6 +1,7 @@
 import type { MetricRow } from "@/types/bbva";
 import type { EnvironmentMonitoringDailyResult } from "@/services/environmentMonitoringService";
 import type { IncidentMonitoringResult } from "@/services/versionadoIncidentesService";
+import type { AwsInformComparisonResult } from "@/services/metricsService";
 
 type Primitive = string | number;
 
@@ -49,18 +50,6 @@ function escapeCsv(value: Primitive): string {
     return `"${text.replace(/"/g, '""')}"`;
   }
   return text;
-}
-
-function formatExecDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) return "0 ms";
-  if (ms >= 1000) return `${(ms / 1000).toFixed(2)} s`;
-  return `${ms.toFixed(2)} ms`;
-}
-
-function formatMs(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "0 ms";
-  if (value >= 1000) return `${(value / 1000).toFixed(2)} s`;
-  return `${value.toFixed(2)} ms`;
 }
 
 function buildCsv(headers: string[], rows: Primitive[][]): string {
@@ -131,6 +120,18 @@ export async function copyTableToGoogleSheets(
       "text/plain": new Blob([tsv], { type: "text/plain" }),
     }),
   ]);
+}
+
+function formatExecDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "0 ms";
+  if (ms >= 1000) return `${(ms / 1000).toFixed(2)} s`;
+  return `${ms.toFixed(2)} ms`;
+}
+
+function formatMs(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0 ms";
+  if (value >= 1000) return `${(value / 1000).toFixed(2)} s`;
+  return `${value.toFixed(2)} ms`;
 }
 
 function parseInvokerTxItem(value: unknown): InvokerTxItem | null {
@@ -342,6 +343,10 @@ function renderInvokedParamText(value: unknown): string {
     .join("\n\n");
 }
 
+/* =========================
+   AWS MONITOREO - METRICAS / GRAFICAS
+========================= */
+
 function buildAwsMonitoringMatrix(rows: MetricRow[]): {
   headers: string[];
   rows: Primitive[][];
@@ -349,20 +354,26 @@ function buildAwsMonitoringMatrix(rows: MetricRow[]): {
   const headers = [
     "Site",
     "InvokerTx",
+    "InvokerTx simple",
     "Library",
     "UtilityType",
     "InvokedParam",
     "Trace",
   ];
 
-  const matrix = rows.map((row) => [
-    row.site,
-    renderInvokerTxText(row.invokerTx),
-    renderLibraryText(row.invokerLibrary),
-    renderUtilityTypeText(row.utilitytype),
-    renderInvokedParamText(row.invokedparam),
-    String(row.trace ?? "").trim() || "-",
-  ]);
+  const matrix = rows.map((row) => {
+    const parsedInvokerTx = parseInvokerTxItem(row.invokerTx);
+
+    return [
+      row.site,
+      renderInvokerTxText(row.invokerTx),
+      parsedInvokerTx?.invokerTx || "-",
+      renderLibraryText(row.invokerLibrary),
+      renderUtilityTypeText(row.utilitytype),
+      renderInvokedParamText(row.invokedparam),
+      String(row.trace ?? "").trim() || "-",
+    ];
+  });
 
   return { headers, rows: matrix };
 }
@@ -381,6 +392,108 @@ export async function copyAwsMonitoringToSheets(rows: MetricRow[]): Promise<void
   const matrix = buildAwsMonitoringMatrix(rows);
   await copyTableToGoogleSheets(matrix.headers, matrix.rows);
 }
+
+/* =========================
+   AWS INFORM / COMPARATIVO LIVE-02 VS LIVE-04
+========================= */
+
+function buildAwsInformMetricsMatrix(
+  result: AwsInformComparisonResult
+): {
+  headers: string[];
+  rows: Primitive[][];
+} {
+  const headers = [
+    "InvokerTx",
+    "LIVE-02 Exec",
+    "LIVE-02 Errors",
+    "LIVE-02 Jumps",
+    "LIVE-02 Resp",
+    "LIVE-04 Exec",
+    "LIVE-04 Errors",
+    "LIVE-04 Jumps",
+    "LIVE-04 Resp",
+    "Delta Exec",
+    "Delta Errors",
+    "Delta Jumps",
+    "Delta Resp",
+  ];
+
+  const rows = result.rows.map((row) => [
+    row.invokerTx,
+    row.live02.executions,
+    row.live02.technicalErrors,
+    row.live02.jumps,
+    formatMs(row.live02.meanDurationMs),
+    row.live04.executions,
+    row.live04.technicalErrors,
+    row.live04.jumps,
+    formatMs(row.live04.meanDurationMs),
+    row.deltaExecutions,
+    row.deltaTechnicalErrors,
+    row.deltaJumps,
+    formatMs(row.deltaMeanDurationMs),
+  ]);
+
+  return { headers, rows };
+}
+
+function buildAwsInformTracesMatrix(
+  result: AwsInformComparisonResult
+): {
+  headers: string[];
+  rows: Primitive[][];
+} {
+  const headers = ["InvokerTx", "Trace LIVE-02", "Trace LIVE-04"];
+
+  const rows = result.rows.map((row) => [
+    row.invokerTx,
+    row.live02.trace || "-",
+    row.live04.trace || "-",
+  ]);
+
+  return { headers, rows };
+}
+
+export function buildAwsInformCsv(
+  result: AwsInformComparisonResult,
+  view: "metrics" | "traces"
+): string {
+  const matrix =
+    view === "metrics"
+      ? buildAwsInformMetricsMatrix(result)
+      : buildAwsInformTracesMatrix(result);
+
+  return buildCsv(matrix.headers, matrix.rows);
+}
+
+export function buildAwsInformSheetsText(
+  result: AwsInformComparisonResult,
+  view: "metrics" | "traces"
+): string {
+  const matrix =
+    view === "metrics"
+      ? buildAwsInformMetricsMatrix(result)
+      : buildAwsInformTracesMatrix(result);
+
+  return buildTsv(matrix.headers, matrix.rows);
+}
+
+export async function copyAwsInformToSheets(
+  result: AwsInformComparisonResult,
+  view: "metrics" | "traces"
+): Promise<void> {
+  const matrix =
+    view === "metrics"
+      ? buildAwsInformMetricsMatrix(result)
+      : buildAwsInformTracesMatrix(result);
+
+  await copyTableToGoogleSheets(matrix.headers, matrix.rows);
+}
+
+/* =========================
+   MONITOREO DE ENTORNOS
+========================= */
 
 function getEnvironmentPhaseLabel(phase: string): string {
   if (phase === "before") return "Before";
@@ -439,6 +552,10 @@ export async function copyEnvironmentMonitoringToSheets(
   const matrix = buildEnvironmentMonitoringMatrix(result);
   await copyTableToGoogleSheets(matrix.headers, matrix.rows);
 }
+
+/* =========================
+   MONITOREO DE INCIDENTES
+========================= */
 
 function getIncidentPhaseLabel(phase: string): string {
   if (phase === "before") return "Before";

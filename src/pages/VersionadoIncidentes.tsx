@@ -15,7 +15,6 @@ import {
   Boxes,
   Activity,
   Brain,
-  Cpu,
   Sparkles,
   Bot,
 } from "lucide-react";
@@ -79,7 +78,7 @@ const AI_PROVIDER_OPTIONS: Array<{
   value: IncidentAiProvider;
   label: string;
 }> = [
-  { value: "heuristic", label: "Resumen heurístico" },
+  { value: "heuristic", label: "Resumen Offline" },
   { value: "local", label: "Local (Gemini Nano / Prompt API)" },
   { value: "openai", label: "OpenAI API" },
   { value: "gemini", label: "Gemini API" },
@@ -96,6 +95,7 @@ const LOCAL_MODELS: IncidentAiModel[] = ["local-gemini-nano"];
 const HEURISTIC_MODELS: IncidentAiModel[] = ["heuristic-summary"];
 
 type ViewMode = "charts" | "table" | "both";
+type IncidentSummaryRowLike = IncidentMonitoringResult["rows"][number];
 
 function formatMs(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return "0 ms";
@@ -157,12 +157,12 @@ function buildCsv(result: IncidentMonitoringResult): string {
     row.trx,
     row.phase,
     row.date,
-    row.exception,
-    row.description,
-    row.resumenIA,
-    row.detalleErroresControlados,
+    normalizeExportText(row.exception),
+    normalizeExportText(row.description),
+    normalizeExportText(row.resumenIA),
+    normalizeExportText(row.detalleErroresControlados),
     row.codigoErrorControlado,
-    row.apxChannel,
+    normalizeExportText(row.apxChannel),
     row.fechaRevision,
     row.numeroEjecuciones,
     row.numeroErrores,
@@ -199,12 +199,12 @@ function buildSheetsText(result: IncidentMonitoringResult): string {
     row.trx,
     row.phase,
     row.date,
-    row.exception,
-    row.description,
-    row.resumenIA,
-    row.detalleErroresControlados,
+    normalizeExportText(row.exception),
+    normalizeExportText(row.description),
+    normalizeExportText(row.resumenIA),
+    normalizeExportText(row.detalleErroresControlados),
     row.codigoErrorControlado,
-    row.apxChannel,
+    normalizeExportText(row.apxChannel),
     row.fechaRevision,
     String(row.numeroEjecuciones),
     String(row.numeroErrores),
@@ -233,7 +233,8 @@ async function copySvgChartAsImage(container: HTMLDivElement | null) {
 
     await new Promise<void>((resolve, reject) => {
       img.onload = () => resolve();
-      img.onerror = () => reject(new Error("No se pudo cargar la imagen del gráfico."));
+      img.onerror = () =>
+        reject(new Error("No se pudo cargar la imagen del gráfico."));
       img.src = url;
     });
 
@@ -264,6 +265,168 @@ async function copySvgChartAsImage(container: HTMLDivElement | null) {
   }
 }
 
+function buildOperationalSignals(row: IncidentSummaryRowLike): string[] {
+  const items: string[] = [];
+
+  if (row.numeroErrores > 0) {
+    items.push(`${row.numeroErrores.toLocaleString()} errores técnicos`);
+  }
+
+  if (row.numeroEjecuciones > 0) {
+    items.push(`${row.numeroEjecuciones.toLocaleString()} ejecuciones`);
+  }
+
+  if (row.numeroTiempoRespuestaMs > 0) {
+    items.push(`respuesta promedio ${formatMs(row.numeroTiempoRespuestaMs)}`);
+  }
+
+  if (row.tuvoMayorNumeroEjecuciones === "Sí") {
+    items.push("más ejecuciones vs día previo");
+  }
+
+  if (row.aumentoPromedioTiempoRespuesta === "Sí") {
+    items.push("mayor tiempo de respuesta vs día previo");
+  }
+
+  return items;
+}
+
+function parseSummarySections(summary: string) {
+  return String(summary || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const match = line.match(/^([^:]+):\s*(.+)$/);
+      if (!match) {
+        return { title: "Resumen", content: line };
+      }
+
+      return {
+        title: match[1].trim(),
+        content: match[2].trim(),
+      };
+    });
+}
+
+  function normalizeExportText(value: string | number): string {
+  return String(value ?? "")
+    .split(/\n+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .join(" | ");
+}
+
+function SummarySectionCard({
+  title,
+  content,
+}: {
+  title: string;
+  content: string;
+}) {
+  return (
+    <div className="rounded-xl border border-border/60 bg-background/60 p-3">
+      <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        {title}
+      </div>
+      <div className="text-sm leading-6 text-foreground/90">{content}</div>
+    </div>
+  );
+}
+
+function StructuredIncidentSummary({
+  row,
+  provider,
+}: {
+  row: IncidentSummaryRowLike;
+  provider: IncidentAiProvider;
+}) {
+  const sections = parseSummarySections(row.resumenIA || row.description || "");
+  const operationalSignals = buildOperationalSignals(row);
+
+  const providerLabel =
+    provider === "heuristic"
+      ? "Resumen offline"
+      : provider === "local"
+      ? "Resumen IA local"
+      : provider === "openai"
+      ? "Resumen OpenAI"
+      : "Resumen Gemini";
+
+  return (
+    <div className="max-w-[380px] space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="rounded-full border border-primary/20 bg-primary/10 px-2.5 py-1 text-[11px] font-semibold text-primary">
+          {providerLabel}
+        </span>
+
+        {row.exception ? (
+          <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2.5 py-1 text-[11px] font-semibold text-amber-300">
+            {row.exception}
+          </span>
+        ) : null}
+      </div>
+
+      <div className="space-y-2">
+        {sections.length ? (
+          sections.map((section, index) => (
+            <SummarySectionCard
+              key={`${section.title}-${index}`}
+              title={section.title}
+              content={section.content}
+            />
+          ))
+        ) : (
+          <SummarySectionCard
+            title="Resumen"
+            content="No hay información suficiente para construir el resumen."
+          />
+        )}
+      </div>
+
+      <div className="rounded-xl border border-border/60 bg-muted/20 p-3">
+        <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Contexto operativo
+        </div>
+
+        <div className="space-y-2 text-sm">
+          {row.codigoErrorControlado ? (
+            <div>
+              <span className="font-semibold text-muted-foreground">
+                Código controlado:
+              </span>{" "}
+              <span className="font-mono text-foreground">
+                {row.codigoErrorControlado}
+              </span>
+            </div>
+          ) : null}
+
+          {row.apxChannel ? (
+            <div>
+              <span className="font-semibold text-muted-foreground">
+                Canal APX:
+              </span>{" "}
+              <span className="text-foreground">{row.apxChannel}</span>
+            </div>
+          ) : null}
+
+          {operationalSignals.length ? (
+            <ul className="list-disc space-y-1 pl-5 text-foreground/90">
+              {operationalSignals.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          ) : (
+            <div className="text-muted-foreground">
+              Sin señales operativas relevantes.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function StyledIncidentTooltip({
   active,
   payload,
@@ -274,9 +437,10 @@ function StyledIncidentTooltip({
   if (!active || !payload?.length) return null;
 
   const point = payload[0].payload;
+  const sections = parseSummarySections(String(point.resumenIA ?? ""));
 
   return (
-    <div className="max-w-[420px] rounded-2xl border border-slate-700 bg-slate-950/95 p-4 shadow-2xl backdrop-blur">
+    <div className="max-w-[440px] rounded-2xl border border-slate-700 bg-slate-950/95 p-4 shadow-2xl backdrop-blur">
       <div className="mb-2 text-sm font-bold text-cyan-300">
         {String(point.fecha ?? "-")}
       </div>
@@ -287,15 +451,21 @@ function StyledIncidentTooltip({
           {String(point.trx ?? "-")}
         </div>
         <div>
-          <span className="font-semibold text-slate-400">Número de ejecuciones:</span>{" "}
+          <span className="font-semibold text-slate-400">
+            Número de ejecuciones:
+          </span>{" "}
           {Number(point.numeroEjecuciones ?? 0).toLocaleString()}
         </div>
         <div>
-          <span className="font-semibold text-slate-400">Número de errores:</span>{" "}
+          <span className="font-semibold text-slate-400">
+            Número de errores:
+          </span>{" "}
           {Number(point.numeroErrores ?? 0).toLocaleString()}
         </div>
         <div>
-          <span className="font-semibold text-slate-400">Tiempo de respuesta:</span>{" "}
+          <span className="font-semibold text-slate-400">
+            Tiempo de respuesta:
+          </span>{" "}
           {formatMs(Number(point.numeroTiempoRespuestaMs ?? 0))}
         </div>
 
@@ -306,11 +476,30 @@ function StyledIncidentTooltip({
           </div>
         </div>
 
-        <div className="pt-2">
-          <span className="font-semibold text-slate-400">Resumen IA:</span>
-          <div className="mt-1 whitespace-pre-wrap break-words text-emerald-300">
-            {String(point.resumenIA ?? "-")}
-          </div>
+        <div className="space-y-2 pt-2">
+          <span className="font-semibold text-slate-400">
+            Resumen estructurado:
+          </span>
+
+          {sections.length ? (
+            sections.map((section, index) => (
+              <div
+                key={`${section.title}-${index}`}
+                className="rounded-lg border border-slate-700 bg-slate-900/70 p-2"
+              >
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                  {section.title}
+                </div>
+                <div className="mt-1 whitespace-pre-wrap break-words text-emerald-300">
+                  {section.content}
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="rounded-lg border border-slate-700 bg-slate-900/70 p-2 text-emerald-300">
+              {String(point.resumenIA ?? "-")}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -345,7 +534,9 @@ function IncidentMetricChart({
               toast.success("Gráfico copiado como imagen.");
             } catch (error) {
               toast.error(
-                error instanceof Error ? error.message : "No se pudo copiar la imagen."
+                error instanceof Error
+                  ? error.message
+                  : "No se pudo copiar la imagen."
               );
             }
           }}
@@ -383,8 +574,10 @@ export default function VersionadoIncidentes() {
   const { bearerToken, setBearerToken } = useBearerToken();
   const [showToken, setShowToken] = useState(false);
 
-  const [aiProvider, setAiProvider] = useState<IncidentAiProvider>("heuristic");
-  const [aiModel, setAiModel] = useState<IncidentAiModel>("heuristic-summary");
+  const [aiProvider, setAiProvider] =
+    useState<IncidentAiProvider>("heuristic");
+  const [aiModel, setAiModel] =
+    useState<IncidentAiModel>("heuristic-summary");
   const [openAiApiKey, setOpenAiApiKey] = useState("");
   const [showOpenAiKey, setShowOpenAiKey] = useState(false);
   const [geminiApiKey, setGeminiApiKey] = useState("");
@@ -392,7 +585,8 @@ export default function VersionadoIncidentes() {
 
   const [environment, setEnvironment] = useState<EnvironmentOption>("INT");
   const [installationDay, setInstallationDay] = useState<Date>(new Date());
-  const [rangeMode, setRangeMode] = useState<InstallationRangeMode>("before");
+  const [rangeMode, setRangeMode] =
+    useState<InstallationRangeMode>("before");
   const [viewMode, setViewMode] = useState<ViewMode>("both");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<IncidentMonitoringResult | null>(null);
@@ -433,7 +627,9 @@ export default function VersionadoIncidentes() {
           trx: row.trx,
           numeroEjecuciones: row.numeroEjecuciones,
           numeroErrores: row.numeroErrores,
-          numeroTiempoRespuestaMs: Number(row.numeroTiempoRespuestaMs.toFixed(2)),
+          numeroTiempoRespuestaMs: Number(
+            row.numeroTiempoRespuestaMs.toFixed(2)
+          ),
           description: row.description,
           resumenIA: row.resumenIA,
         })),
@@ -449,7 +645,9 @@ export default function VersionadoIncidentes() {
           trx: row.trx,
           numeroEjecuciones: row.numeroEjecuciones,
           numeroErrores: row.numeroErrores,
-          numeroTiempoRespuestaMs: Number(row.numeroTiempoRespuestaMs.toFixed(2)),
+          numeroTiempoRespuestaMs: Number(
+            row.numeroTiempoRespuestaMs.toFixed(2)
+          ),
           description: row.description,
           resumenIA: row.resumenIA,
         })),
@@ -465,7 +663,9 @@ export default function VersionadoIncidentes() {
           trx: row.trx,
           numeroEjecuciones: row.numeroEjecuciones,
           numeroErrores: row.numeroErrores,
-          numeroTiempoRespuestaMs: Number(row.numeroTiempoRespuestaMs.toFixed(2)),
+          numeroTiempoRespuestaMs: Number(
+            row.numeroTiempoRespuestaMs.toFixed(2)
+          ),
           description: row.description,
           resumenIA: row.resumenIA,
         })),
@@ -578,6 +778,8 @@ export default function VersionadoIncidentes() {
     }
   };
 
+
+
   const showCharts = viewMode === "charts" || viewMode === "both";
   const showTable = viewMode === "table" || viewMode === "both";
   const isComplete = result?.mode === "complete";
@@ -619,7 +821,12 @@ export default function VersionadoIncidentes() {
               <Label className="text-xs font-medium text-muted-foreground">
                 Proveedor IA
               </Label>
-              <Select value={aiProvider} onValueChange={(value) => handleProviderChange(value as IncidentAiProvider)}>
+              <Select
+                value={aiProvider}
+                onValueChange={(value) =>
+                  handleProviderChange(value as IncidentAiProvider)
+                }
+              >
                 <SelectTrigger className="h-11 rounded-xl font-mono text-xs">
                   <SelectValue placeholder="Selecciona proveedor IA" />
                 </SelectTrigger>
@@ -639,7 +846,12 @@ export default function VersionadoIncidentes() {
               <Label className="text-xs font-medium text-muted-foreground">
                 Modelo IA
               </Label>
-              <Select value={aiModel} onValueChange={(value) => setAiModel(value as IncidentAiModel)}>
+              <Select
+                value={aiModel}
+                onValueChange={(value) =>
+                  setAiModel(value as IncidentAiModel)
+                }
+              >
                 <SelectTrigger className="h-11 rounded-xl font-mono text-xs">
                   <SelectValue placeholder="Selecciona modelo IA" />
                 </SelectTrigger>
@@ -712,10 +924,14 @@ export default function VersionadoIncidentes() {
 
           <div className="mt-5 grid gap-5 md:grid-cols-3">
             <div className="space-y-2">
-              <Label className="text-xs font-medium text-muted-foreground">Entorno</Label>
+              <Label className="text-xs font-medium text-muted-foreground">
+                Entorno
+              </Label>
               <Select
                 value={environment}
-                onValueChange={(value) => setEnvironment(value as EnvironmentOption)}
+                onValueChange={(value) =>
+                  setEnvironment(value as EnvironmentOption)
+                }
               >
                 <SelectTrigger className="h-11 rounded-xl font-mono text-xs">
                   <SelectValue placeholder="Selecciona entorno" />
@@ -761,7 +977,9 @@ export default function VersionadoIncidentes() {
             </div>
 
             <div className="space-y-2">
-              <Label className="text-xs font-medium text-muted-foreground">Rango</Label>
+              <Label className="text-xs font-medium text-muted-foreground">
+                Rango
+              </Label>
               <Select
                 value={rangeMode}
                 onValueChange={(value) =>
@@ -856,7 +1074,9 @@ export default function VersionadoIncidentes() {
           <div className="rounded-2xl border border-border/70 bg-card/95 p-5 shadow-sm">
             <div className="flex items-center gap-2">
               <Boxes className="h-4 w-4 text-primary" />
-              <span className="text-xs font-medium text-muted-foreground">TRX Principal</span>
+              <span className="text-xs font-medium text-muted-foreground">
+                TRX Principal
+              </span>
             </div>
             <div className="mt-3 break-all font-mono text-xl font-bold">
               {result?.trx || "-"}
@@ -866,7 +1086,9 @@ export default function VersionadoIncidentes() {
           <div className="rounded-2xl border border-border/70 bg-card/95 p-5 shadow-sm">
             <div className="flex items-center gap-2">
               <Brain className="h-4 w-4 text-violet-500" />
-              <span className="text-xs font-medium text-muted-foreground">Proveedor IA</span>
+              <span className="text-xs font-medium text-muted-foreground">
+                Proveedor IA
+              </span>
             </div>
             <div className="mt-3 font-mono text-sm font-bold">
               {aiProvider}
@@ -876,7 +1098,9 @@ export default function VersionadoIncidentes() {
           <div className="rounded-2xl border border-border/70 bg-card/95 p-5 shadow-sm">
             <div className="flex items-center gap-2">
               <Sparkles className="h-4 w-4 text-amber-500" />
-              <span className="text-xs font-medium text-muted-foreground">Modelo IA</span>
+              <span className="text-xs font-medium text-muted-foreground">
+                Modelo IA
+              </span>
             </div>
             <div className="mt-3 break-all font-mono text-sm font-bold">
               {aiModel}
@@ -886,7 +1110,9 @@ export default function VersionadoIncidentes() {
           <div className="rounded-2xl border border-border/70 bg-card/95 p-5 shadow-sm">
             <div className="flex items-center gap-2">
               <Bot className="h-4 w-4 text-emerald-500" />
-              <span className="text-xs font-medium text-muted-foreground">Registros</span>
+              <span className="text-xs font-medium text-muted-foreground">
+                Registros
+              </span>
             </div>
             <div className="mt-3 font-mono text-3xl font-bold">
               {result?.rows.length ?? 0}
@@ -898,7 +1124,9 @@ export default function VersionadoIncidentes() {
           <div className="rounded-2xl border border-border/70 bg-card/95 p-5 shadow-sm">
             <div className="flex items-center gap-2">
               <Boxes className="h-4 w-4 text-primary" />
-              <span className="text-xs font-medium text-muted-foreground">Ejecuciones</span>
+              <span className="text-xs font-medium text-muted-foreground">
+                Ejecuciones
+              </span>
             </div>
             <div className="mt-3 font-mono text-3xl font-bold">
               {result ? result.totals.numeroEjecuciones.toLocaleString() : "0"}
@@ -908,7 +1136,9 @@ export default function VersionadoIncidentes() {
           <div className="rounded-2xl border border-border/70 bg-card/95 p-5 shadow-sm">
             <div className="flex items-center gap-2">
               <AlertTriangle className="h-4 w-4 text-destructive" />
-              <span className="text-xs font-medium text-muted-foreground">Errores</span>
+              <span className="text-xs font-medium text-muted-foreground">
+                Errores
+              </span>
             </div>
             <div className="mt-3 font-mono text-3xl font-bold">
               {result ? result.totals.numeroErrores.toLocaleString() : "0"}
@@ -923,7 +1153,9 @@ export default function VersionadoIncidentes() {
               </span>
             </div>
             <div className="mt-3 font-mono text-3xl font-bold">
-              {result ? formatMs(result.totals.numeroTiempoRespuestaMs) : "0 ms"}
+              {result
+                ? formatMs(result.totals.numeroTiempoRespuestaMs)
+                : "0 ms"}
             </div>
           </div>
         </section>
@@ -960,7 +1192,9 @@ export default function VersionadoIncidentes() {
                 </div>
 
                 <div>
-                  <h2 className="mb-3 text-sm font-semibold">Día de instalación</h2>
+                  <h2 className="mb-3 text-sm font-semibold">
+                    Día de instalación
+                  </h2>
                   <div className="grid gap-4 xl:grid-cols-3">
                     <IncidentMetricChart
                       title="Instalación · Número de ejecuciones"
@@ -1050,52 +1284,52 @@ export default function VersionadoIncidentes() {
             </div>
 
             <div className="overflow-auto max-h-[78vh]">
-              <table className="w-max min-w-[2550px] text-left text-sm">
+              <table className="w-max min-w-[2850px] text-left text-sm">
                 <thead className="sticky top-0 z-20 bg-muted/95 backdrop-blur">
                   <tr className="border-b border-border/70">
-                    <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground min-w-[120px]">
+                    <th className="min-w-[120px] px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       Fase
                     </th>
-                    <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground min-w-[125px]">
+                    <th className="min-w-[125px] px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       Fecha
                     </th>
-                    <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground min-w-[150px]">
+                    <th className="min-w-[150px] px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       TRX
                     </th>
-                    <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground min-w-[260px]">
+                    <th className="min-w-[260px] px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       Exception
                     </th>
-                    <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground min-w-[420px]">
+                    <th className="min-w-[420px] px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       Description
                     </th>
-                    <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground min-w-[360px]">
+                    <th className="min-w-[430px] px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       Resumen IA
                     </th>
-                    <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground min-w-[420px]">
+                    <th className="min-w-[420px] px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       Detalle Errores controlados
                     </th>
-                    <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground min-w-[290px]">
+                    <th className="min-w-[290px] px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       Codigo de Error Controlado
                     </th>
-                    <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground min-w-[120px]">
+                    <th className="min-w-[120px] px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       APX Chanel
                     </th>
-                    <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground min-w-[145px]">
+                    <th className="min-w-[145px] px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       Fecha de Revision
                     </th>
-                    <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground min-w-[160px] text-right">
+                    <th className="min-w-[160px] px-4 py-4 text-right text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       Número de ejecuciones
                     </th>
-                    <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground min-w-[150px] text-right">
+                    <th className="min-w-[150px] px-4 py-4 text-right text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       Número de errores
                     </th>
-                    <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground min-w-[210px] text-right">
+                    <th className="min-w-[210px] px-4 py-4 text-right text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       Tiempo de respuesta (ms)
                     </th>
-                    <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground min-w-[220px]">
+                    <th className="min-w-[220px] px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       Tuvo mayor número de ejecuciones
                     </th>
-                    <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground min-w-[240px]">
+                    <th className="min-w-[240px] px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       Aumento el promedio de tiempo respuesta
                     </th>
                   </tr>
@@ -1121,7 +1355,7 @@ export default function VersionadoIncidentes() {
                         </span>
                       </td>
 
-                      <td className="px-4 py-4 font-medium whitespace-nowrap">
+                      <td className="whitespace-nowrap px-4 py-4 font-medium">
                         {row.date}
                       </td>
 
@@ -1142,9 +1376,10 @@ export default function VersionadoIncidentes() {
                       </td>
 
                       <td className="px-4 py-4">
-                        <div className="max-w-[330px] whitespace-pre-wrap break-words text-sm leading-6 text-primary">
-                          {row.resumenIA || "-"}
-                        </div>
+                        <StructuredIncidentSummary
+                          row={row}
+                          provider={aiProvider}
+                        />
                       </td>
 
                       <td className="px-4 py-4">
@@ -1159,23 +1394,23 @@ export default function VersionadoIncidentes() {
                         </div>
                       </td>
 
-                      <td className="px-4 py-4 font-mono font-medium whitespace-nowrap">
+                      <td className="whitespace-nowrap px-4 py-4 font-mono font-medium">
                         {row.apxChannel || "-"}
                       </td>
 
-                      <td className="px-4 py-4 whitespace-nowrap">
+                      <td className="whitespace-nowrap px-4 py-4">
                         {row.fechaRevision || "-"}
                       </td>
 
-                      <td className="px-4 py-4 text-right font-mono font-semibold whitespace-nowrap">
+                      <td className="whitespace-nowrap px-4 py-4 text-right font-mono font-semibold">
                         {row.numeroEjecuciones.toLocaleString()}
                       </td>
 
-                      <td className="px-4 py-4 text-right font-mono font-semibold whitespace-nowrap">
+                      <td className="whitespace-nowrap px-4 py-4 text-right font-mono font-semibold">
                         {row.numeroErrores.toLocaleString()}
                       </td>
 
-                      <td className="px-4 py-4 text-right font-mono font-semibold whitespace-nowrap">
+                      <td className="whitespace-nowrap px-4 py-4 text-right font-mono font-semibold">
                         {formatMs(row.numeroTiempoRespuestaMs)}
                       </td>
 

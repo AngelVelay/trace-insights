@@ -407,7 +407,7 @@ function buildTraceSummary(entries: TraceEntry[]): string {
   if (!entries.length) return "-";
 
   const lines: string[] = [];
-  lines.push("=== RESUMEN DE SALTOS Y TIEMPOS DE RESPUESTA ===");
+  lines.push("RESUMEN DE SALTOS Y TIEMPOS DE RESPUESTA ===");
   lines.push(`Total de saltos encontrados: ${totalResultados}`);
   lines.push(`Tiempo total de saltos: ${formatTraceDuration(tiempoTotalSaltos)}`);
   lines.push("============================================================");

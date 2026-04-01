@@ -14,6 +14,12 @@ import {
   type AwsInformComparisonResult,
 } from "@/services/metricsService";
 import { fetchSpans, classifySpans } from "@/services/tracesService";
+import {
+  buildAwsMonitoringCsv,
+  copyAwsMonitoringToSheets,
+  buildAwsInformCsv,
+  copyAwsInformToSheets,
+} from "@/services/monitoringExportService";
 import FilterPanel from "@/components/FilterPanel";
 import KPIDashboard from "@/components/KPIDashboard";
 import MetricsTable from "@/components/MetricsTable";
@@ -26,7 +32,7 @@ import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
-import { FileSpreadsheet, Search } from "lucide-react";
+import { Copy, Download, Search } from "lucide-react";
 
 type InvokerTxItem = {
   invokerTx: string;
@@ -161,6 +167,16 @@ function parseInvokerTxList(text: string): string[] {
         .filter(Boolean)
     )
   );
+}
+
+function downloadCsvFile(content: string, filename: string) {
+  const blob = new Blob([content], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 export default function Dashboard() {
@@ -359,6 +375,87 @@ export default function Dashboard() {
     bearerToken,
   ]);
 
+  const handleExportMetricsCsv = () => {
+    if (!rows.length) {
+      toast.error("No hay métricas para exportar.");
+      return;
+    }
+
+    downloadCsvFile(
+      buildAwsMonitoringCsv(rows),
+      `aws_monitoreo_metricas_${Date.now()}.csv`
+    );
+    toast.success("CSV de métricas descargado.");
+  };
+
+  const handleCopyMetricsSheets = async () => {
+    if (!rows.length) {
+      toast.error("No hay métricas para copiar.");
+      return;
+    }
+
+    try {
+      await copyAwsMonitoringToSheets(rows);
+      toast.success("Métricas copiadas. Ya puedes pegarlas en Google Sheets.");
+    } catch {
+      toast.error("No se pudo copiar al portapapeles.");
+    }
+  };
+
+  const handleExportChartsCsv = () => {
+    if (!rows.length) {
+      toast.error("No hay datos de gráficas para exportar.");
+      return;
+    }
+
+    downloadCsvFile(
+      buildAwsMonitoringCsv(rows),
+      `aws_monitoreo_graficas_${Date.now()}.csv`
+    );
+    toast.success("CSV de gráficas descargado.");
+  };
+
+  const handleCopyChartsSheets = async () => {
+    if (!rows.length) {
+      toast.error("No hay datos de gráficas para copiar.");
+      return;
+    }
+
+    try {
+      await copyAwsMonitoringToSheets(rows);
+      toast.success("Datos de gráficas copiados. Ya puedes pegarlos en Google Sheets.");
+    } catch {
+      toast.error("No se pudo copiar al portapapeles.");
+    }
+  };
+
+  const handleExportAwsInformCsv = (view: "metrics" | "traces") => {
+    if (!awsInformResult) {
+      toast.error("No hay informe AWS para exportar.");
+      return;
+    }
+
+    downloadCsvFile(
+      buildAwsInformCsv(awsInformResult, view),
+      `inform_aws_${view}_${Date.now()}.csv`
+    );
+    toast.success(`CSV de Inform AWS (${view}) descargado.`);
+  };
+
+  const handleCopyAwsInformSheets = async (view: "metrics" | "traces") => {
+    if (!awsInformResult) {
+      toast.error("No hay informe AWS para copiar.");
+      return;
+    }
+
+    try {
+      await copyAwsInformToSheets(awsInformResult, view);
+      toast.success(`Inform AWS (${view}) copiado. Ya puedes pegarlo en Google Sheets.`);
+    } catch {
+      toast.error("No se pudo copiar al portapapeles.");
+    }
+  };
+
   return (
     <div className="min-h-screen gradient-mesh">
       <LoadingOverlay
@@ -388,14 +485,59 @@ export default function Dashboard() {
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="charts">
-            <MetricsCharts
-              rows={rows}
-              selectedInvokerTx={selectedInvokerTx}
-            />
+          <TabsContent value="charts" className="space-y-4">
+            <div className="flex flex-wrap gap-3">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={handleExportChartsCsv}
+                disabled={!rows.length}
+                className="h-10 rounded-xl"
+              >
+                <Download className="mr-2 h-4 w-4" />
+                Exportar CSV
+              </Button>
+
+              <Button
+                type="button"
+                variant="outline"
+                onClick={handleCopyChartsSheets}
+                disabled={!rows.length}
+                className="h-10 rounded-xl"
+              >
+                <Copy className="mr-2 h-4 w-4" />
+                Copiar para Google Sheets
+              </Button>
+            </div>
+
+            <MetricsCharts rows={rows} selectedInvokerTx={selectedInvokerTx} />
           </TabsContent>
 
-          <TabsContent value="metrics">
+          <TabsContent value="metrics" className="space-y-4">
+            <div className="flex flex-wrap gap-3">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={handleExportMetricsCsv}
+                disabled={!rows.length}
+                className="h-10 rounded-xl"
+              >
+                <Download className="mr-2 h-4 w-4" />
+                Exportar CSV
+              </Button>
+
+              <Button
+                type="button"
+                variant="outline"
+                onClick={handleCopyMetricsSheets}
+                disabled={!rows.length}
+                className="h-10 rounded-xl"
+              >
+                <Copy className="mr-2 h-4 w-4" />
+                Copiar para Google Sheets
+              </Button>
+            </div>
+
             <MetricsTable
               rows={rows}
               loading={loading}
@@ -416,62 +558,113 @@ export default function Dashboard() {
           </TabsContent>
 
           <TabsContent value="inform-aws" className="space-y-6">
-  <section className="rounded-2xl border border-border/70 bg-card/95 p-6 shadow-sm">
-    <div className="grid gap-5 xl:grid-cols-3">
-      <div className="space-y-2 xl:col-span-3">
-        <Label className="text-xs font-medium text-muted-foreground">
-          Lista de invokerTx
-        </Label>
-        <Textarea
-          value={awsInformInvokerTxInput}
-          onChange={(e) => setAwsInformInvokerTxInput(e.target.value.toUpperCase())}
-          placeholder={`Ejemplo:\nKSKRT00201ZZ\nMMCDT01901MX\nMCNHTWEF01MX`}
-          className="min-h-[160px] rounded-xl font-mono text-xs"
-        />
-        <p className="text-xs text-muted-foreground">
-          Puedes pegar uno por línea, separados por coma, espacio o punto y coma.
-        </p>
-      </div>
+            <section className="rounded-2xl border border-border/70 bg-card/95 p-6 shadow-sm">
+              <div className="grid gap-5 xl:grid-cols-3">
+                <div className="space-y-2 xl:col-span-3">
+                  <Label className="text-xs font-medium text-muted-foreground">
+                    Lista de invokerTx
+                  </Label>
+                  <Textarea
+                    value={awsInformInvokerTxInput}
+                    onChange={(e) => setAwsInformInvokerTxInput(e.target.value.toUpperCase())}
+                    placeholder={`Ejemplo:\nKSKRT00201ZZ\nMMCDT01901MX\nMCNHTWEF01MX`}
+                    className="min-h-[160px] rounded-xl font-mono text-xs"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Puedes pegar uno por línea, separados por coma, espacio o punto y coma.
+                  </p>
+                </div>
 
-      <div className="space-y-2">
-        <Label className="text-xs font-medium text-muted-foreground">
-          Fecha inicio
-        </Label>
-        <DateTimePicker value={awsInformFromDate} onChange={setAwsInformFromDate} />
-      </div>
+                <div className="space-y-2">
+                  <Label className="text-xs font-medium text-muted-foreground">
+                    Fecha inicio
+                  </Label>
+                  <DateTimePicker value={awsInformFromDate} onChange={setAwsInformFromDate} />
+                </div>
 
-      <div className="space-y-2">
-        <Label className="text-xs font-medium text-muted-foreground">
-          Fecha fin
-        </Label>
-        <DateTimePicker value={awsInformToDate} onChange={setAwsInformToDate} />
-      </div>
-    </div>
+                <div className="space-y-2">
+                  <Label className="text-xs font-medium text-muted-foreground">
+                    Fecha fin
+                  </Label>
+                  <DateTimePicker value={awsInformToDate} onChange={setAwsInformToDate} />
+                </div>
 
-    <div className="mt-6 flex flex-wrap gap-3">
-      <Button
-        onClick={handleAwsInformSearch}
-        disabled={loading}
-        className="h-11 rounded-xl px-5"
-      >
-        <Search className="mr-2 h-4 w-4" />
-        {loading ? "Generando..." : "Generar informe AWS"}
-      </Button>
+                <div className="space-y-2">
+                  <Label className="text-xs font-medium text-muted-foreground">
+                  </Label>
+                  <div className="flex h-11 items-center rounded-xl border border-border bg-muted/30 px-3 text-xs text-muted-foreground">
+                  </div>
+                </div>
+              </div>
 
-      <div className="flex h-11 items-center rounded-xl border border-border bg-muted/20 px-4 text-xs text-muted-foreground">
-        Consulta comparativa en LIVE-02 y LIVE-04
-      </div>
-    </div>
-  </section>
+              <div className="mt-6 flex flex-wrap gap-3">
+                <Button
+                  onClick={handleAwsInformSearch}
+                  disabled={loading}
+                  className="h-11 rounded-xl px-5"
+                >
+                  <Search className="mr-2 h-4 w-4" />
+                  {loading ? "Generando..." : "Generar informe AWS"}
+                </Button>
 
-  {awsInformError && (
-    <div className="rounded-2xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive shadow-sm">
-      {awsInformError}
-    </div>
-  )}
+                <div className="flex h-11 items-center rounded-xl border border-border bg-muted/20 px-4 text-xs text-muted-foreground">
+                  Consulta comparativa en LIVE-02 y LIVE-04
+                </div>
+              </div>
+            </section>
 
-  <AwsInformCharts result={awsInformResult} />
-</TabsContent>
+            {awsInformResult ? (
+              <div className="flex flex-wrap gap-3">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => handleExportAwsInformCsv("metrics")}
+                  className="h-10 rounded-xl"
+                >
+                  <Download className="mr-2 h-4 w-4" />
+                  CSV métricas
+                </Button>
+
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => handleExportAwsInformCsv("traces")}
+                  className="h-10 rounded-xl"
+                >
+                  <Download className="mr-2 h-4 w-4" />
+                  CSV trazas
+                </Button>
+
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => handleCopyAwsInformSheets("metrics")}
+                  className="h-10 rounded-xl"
+                >
+                  <Copy className="mr-2 h-4 w-4" />
+                  Copiar métricas a Google Sheets
+                </Button>
+
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => handleCopyAwsInformSheets("traces")}
+                  className="h-10 rounded-xl"
+                >
+                  <Copy className="mr-2 h-4 w-4" />
+                  Copiar trazas a Google Sheets
+                </Button>
+              </div>
+            ) : null}
+
+            {awsInformError && (
+              <div className="rounded-2xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive shadow-sm">
+                {awsInformError}
+              </div>
+            )}
+
+            <AwsInformCharts result={awsInformResult} />
+          </TabsContent>
         </Tabs>
       </main>
     </div>
