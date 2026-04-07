@@ -17,7 +17,8 @@ type HeaderRoute =
   | "pipeline"
   | "versionado-entornos"
   | "versionado-incidentes"
-  | "securizacion-live";
+  | "securizacion-live"
+  | "fresno";
 
 const ROUTES: Array<{ value: HeaderRoute; label: string; path: string }> = [
   { value: "pipeline", label: "AWS Monitoreo", path: "/" },
@@ -36,9 +37,18 @@ const ROUTES: Array<{ value: HeaderRoute; label: string; path: string }> = [
     label: "Monitoreo Securización LIVE",
     path: "/monitoreo/securizacion-live",
   },
+  {
+    value: "fresno",
+    label: "Consultar Fresno",
+    path: "/fresno",
+  },
 ];
 
 function getRouteValue(pathname: string): HeaderRoute {
+  if (pathname.startsWith("/fresno")) {
+    return "fresno";
+  }
+
   if (pathname.startsWith("/monitoreo/securizacion-live")) {
     return "securizacion-live";
   }

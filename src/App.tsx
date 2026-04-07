@@ -12,6 +12,7 @@ import LoginPage from "@/pages/Login";
 import VersionadoEntornos from "@/pages/VersionadoEntornos";
 import VersionadoIncidentes from "@/pages/VersionadoIncidentes";
 import MonitoreoSecurizacionLive from "@/pages/MonitoreoSecurizacionLive";
+import Fresno from "@/pages/Fresno";
 import NotFound from "@/pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -61,6 +62,15 @@ function AppShell() {
           element={
             <ProtectedRoute>
               <MonitoreoSecurizacionLive />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/fresno"
+          element={
+            <ProtectedRoute>
+              <Fresno />
             </ProtectedRoute>
           }
         />
