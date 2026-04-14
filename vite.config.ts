@@ -71,7 +71,6 @@ export default defineConfig({
         secure: false,
         rewrite: (p) => p.replace(/^\/omega-live-02/, ""),
       },
-
       "/apx-console/DEV": createApxConsoleProxy(
         "https://apxconsole-dev-mx.work-02.nextgen.igrupobbva"
       ),
@@ -87,7 +86,6 @@ export default defineConfig({
       "/apx-console/PROD": createApxConsoleProxy(
         "https://apxconsole-mx.live-02.nextgen.igrupobbva"
       ),
-
       "/fresno": createFresnoProxy(),
     },
   },

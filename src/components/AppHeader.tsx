@@ -18,6 +18,7 @@ type HeaderRoute =
   | "versionado-entornos"
   | "versionado-incidentes"
   | "securizacion-live"
+  | "cics-consola-apx"
   | "fresno";
 
 const ROUTES: Array<{ value: HeaderRoute; label: string; path: string }> = [
@@ -38,6 +39,11 @@ const ROUTES: Array<{ value: HeaderRoute; label: string; path: string }> = [
     path: "/monitoreo/securizacion-live",
   },
   {
+    value: "cics-consola-apx",
+    label: "Monitoreo CICS Consola APX",
+    path: "/monitoreo/cics-consola-apx",
+  },
+  {
     value: "fresno",
     label: "Consultar Fresno",
     path: "/fresno",
@@ -47,6 +53,10 @@ const ROUTES: Array<{ value: HeaderRoute; label: string; path: string }> = [
 function getRouteValue(pathname: string): HeaderRoute {
   if (pathname.startsWith("/fresno")) {
     return "fresno";
+  }
+
+  if (pathname.startsWith("/monitoreo/cics-consola-apx")) {
+    return "cics-consola-apx";
   }
 
   if (pathname.startsWith("/monitoreo/securizacion-live")) {

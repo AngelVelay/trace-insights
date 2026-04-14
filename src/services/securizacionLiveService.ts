@@ -9,6 +9,14 @@ const RHO_LIVE_BASE = "https://rho.live-02.nextgen.igrupobbva";
 const OMEGA_PAGE_SIZE = 100;
 const OMEGA_MAX_PAGES = 500;
 
+// Ajustes de performance
+const OMEGA_TIMEOUT_MS = 15000;
+const RHO_TIMEOUT_MS = 12000;
+const OMEGA_RETRIES = 1;
+const RHO_RETRIES = 1;
+const RHO_MAX_CONCURRENCY = 8;
+const MAX_SPANS_TO_ENRICH = 300;
+
 const AAP_CATALOG: Record<string, string> = {
   "00000000": "BCom (Personas)",
   "00000033": "GNC Intraday",

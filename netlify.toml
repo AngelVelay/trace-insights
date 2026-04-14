@@ -1,0 +1,20 @@
+[build]
+  publish = "dist"
+  command = "npm run build"
+
+[[redirects]]
+  from = "/fresno/*"
+  to = "/.netlify/functions/fresno/api/fresno/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/apx-console/*"
+  to = "/.netlify/functions/apx-console/api/apx-console/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

@@ -12,6 +12,7 @@ import LoginPage from "@/pages/Login";
 import VersionadoEntornos from "@/pages/VersionadoEntornos";
 import VersionadoIncidentes from "@/pages/VersionadoIncidentes";
 import MonitoreoSecurizacionLive from "@/pages/MonitoreoSecurizacionLive";
+import MonitoreoCicsConsolaOperacionesApx from "@/pages/MonitoreoCicsConsolaOperacionesApx";
 import Fresno from "@/pages/Fresno";
 import NotFound from "@/pages/NotFound";
 
@@ -62,6 +63,15 @@ function AppShell() {
           element={
             <ProtectedRoute>
               <MonitoreoSecurizacionLive />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/monitoreo/cics-consola-apx"
+          element={
+            <ProtectedRoute>
+              <MonitoreoCicsConsolaOperacionesApx />
             </ProtectedRoute>
           }
         />

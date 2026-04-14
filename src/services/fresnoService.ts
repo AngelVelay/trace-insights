@@ -36,6 +36,68 @@ type FresnoDetailResponse = {
   production_manager?: FresnoPerson | null;
 };
 
+const FRESNO_TIMEOUT_MS = 20000;
+const FRESNO_MAX_CONCURRENCY = 4;
+const FRESNO_MAX_RETRIES = 2;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  retries = FRESNO_MAX_RETRIES,
+  baseDelayMs = 600
+): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+
+      if (attempt === retries) {
+        break;
+      }
+
+      await sleep(baseDelayMs * (attempt + 1));
+    }
+  }
+
+  throw lastError;
+}
+
+async function runWithConcurrency<T, R>(
+  items: T[],
+  worker: (item: T, index: number) => Promise<R>,
+  concurrency = FRESNO_MAX_CONCURRENCY
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+
+  async function runner() {
+    while (true) {
+      const current = nextIndex;
+      nextIndex += 1;
+
+      if (current >= items.length) {
+        break;
+      }
+
+      results[current] = await worker(items[current], current);
+    }
+  }
+
+  const runners = Array.from(
+    { length: Math.min(concurrency, Math.max(items.length, 1)) },
+    () => runner()
+  );
+
+  await Promise.all(runners);
+  return results;
+}
+
 function buildPersonName(person?: FresnoPerson | null): string {
   if (!person) return "-";
 
@@ -72,10 +134,10 @@ function findMexicoUuaaCode(items: FresnoSearchItem[]): FresnoSearchItem | null 
       ? item.deployment_country
       : [];
 
-    const foundMexico = countries.some((country) =>
-      String(country.country_name ?? "").trim().toLowerCase() === "méxico" ||
-      String(country.country_name ?? "").trim().toLowerCase() === "mexico"
-    );
+    const foundMexico = countries.some((country) => {
+      const countryName = String(country.country_name ?? "").trim().toLowerCase();
+      return countryName === "méxico" || countryName === "mexico";
+    });
 
     if (foundMexico) {
       return item;
@@ -95,8 +157,10 @@ function buildSearchUrl(uuaa: string): string {
 }
 
 function buildDetailUrl(uuaaId: string): string {
-  const url = new URL(`/fresno/api/uas-government/v1/uuaa/${uuaaId}`, window.location.origin);
-  return url.toString();
+  return new URL(
+    `/fresno/api/uas-government/v1/uuaa/${uuaaId}`,
+    window.location.origin
+  ).toString();
 }
 
 async function fetchSingleFresnoRow(
@@ -108,13 +172,12 @@ async function fetchSingleFresnoRow(
     "x-session-cookie": sessionCookie,
   };
 
-  const searchResponse = await apiRequest<FresnoSearchItem[]>(
-    buildSearchUrl(uuaa),
-    {
+  const searchResponse = await withRetry(() =>
+    apiRequest<FresnoSearchItem[]>(buildSearchUrl(uuaa), {
       method: "GET",
       headers,
-      timeoutMs: 30000,
-    }
+      timeoutMs: FRESNO_TIMEOUT_MS,
+    })
   );
 
   const mexicoItem = findMexicoUuaaCode(Array.isArray(searchResponse) ? searchResponse : []);
@@ -141,13 +204,12 @@ async function fetchSingleFresnoRow(
       ? String(mexicoItem.deployment_country[0]?.country_name ?? "").trim() || "-"
       : "-";
 
-  const detailResponse = await apiRequest<FresnoDetailResponse>(
-    buildDetailUrl(uuaaId),
-    {
+  const detailResponse = await withRetry(() =>
+    apiRequest<FresnoDetailResponse>(buildDetailUrl(uuaaId), {
       method: "GET",
       headers,
-      timeoutMs: 30000,
-    }
+      timeoutMs: FRESNO_TIMEOUT_MS,
+    })
   );
 
   return {
@@ -169,11 +231,11 @@ export async function fetchFresnoOwners(params: {
   sessionCookie: string;
 }): Promise<FresnoRow[]> {
   const { uuaaInput, sessionCookie } = params;
-
   const uuaas = normalizeUuaaList(uuaaInput);
 
-  const rows = await Promise.all(
-    uuaas.map(async (uuaa) => {
+  return runWithConcurrency(
+    uuaas,
+    async (uuaa) => {
       try {
         return await fetchSingleFresnoRow(uuaa, sessionCookie);
       } catch (error) {
@@ -193,10 +255,9 @@ export async function fetchFresnoOwners(params: {
               : "Error desconocido consultando Fresno",
         } satisfies FresnoRow;
       }
-    })
+    },
+    FRESNO_MAX_CONCURRENCY
   );
-
-  return rows;
 }
 
 export function getNormalizedUuaaList(input: string): string[] {
