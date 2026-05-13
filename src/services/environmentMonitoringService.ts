@@ -75,31 +75,32 @@ const MU_LIVE_BASE = "https://mu.live-02.nextgen.igrupobbva";
 const MU_WORK_BASE = "https://mu.work-02.nextgen.igrupobbva";
 
 function getEnvironmentConfig(environment: EnvironmentOption): {
-  baseUrl: string;
+   baseUrl: string;
   granularity: string;
   q?: string;
 } {
   if (environment === "LIVE-02") {
     return {
       baseUrl: MU_LIVE_BASE,
-      granularity: "30s",
+      granularity: "900s",
     };
   }
 
   if (environment === "PRZ") {
     return {
       baseUrl: MU_LIVE_BASE,
-      granularity: "43200s",
+      granularity: "900s",
       q: `"env" == "PRZ"`,
     };
   }
 
   return {
     baseUrl: MU_WORK_BASE,
-    granularity: "43200s",
+    granularity: "900s",
     q: `"env" == "${environment}"`,
   };
-}
+  }
+
 
 function buildTimeseriesUrl(params: {
   fromTimestamp: NanoTimestamp;
@@ -136,12 +137,29 @@ function extractMetricPoints(payload: TimeseriesApiResponse): TimeseriesMetricPo
   return [];
 }
 
-function sumMetricValues(
+function aggregateMetricValues(
   payload: TimeseriesApiResponse,
   key: "sum_technical_error" | "sum_num_executions" | "mean_span_duration"
 ): number {
   const points = extractMetricPoints(payload);
-  return points.reduce((sum, point) => sum + Number(point.values?.[key] ?? 0), 0);
+
+  if (!points.length) {
+    return 0;
+  }
+
+  if (key === "mean_span_duration") {
+    const total = points.reduce(
+      (sum, point) => sum + Number(point.values?.[key] ?? 0),
+      0
+    );
+
+    return total / points.length;
+  }
+
+  return points.reduce(
+    (sum, point) => sum + Number(point.values?.[key] ?? 0),
+    0
+  );
 }
 
 async function fetchTimeseriesSum(
@@ -160,7 +178,7 @@ async function fetchTimeseriesSum(
 
   const headers = buildAuthHeaders(filters.bearerToken);
   const res = await apiRequest<TimeseriesApiResponse>(url, { headers });
-  return sumMetricValues(res, responseKey);
+  return aggregateMetricValues(res, responseKey);
 }
 
 export async function fetchEnvironmentMonitoringSummary(
@@ -207,10 +225,25 @@ function buildDailyDates(
         offset: -i,
       });
     }
+
+    dates.push({
+      date: base,
+      label: format(base, "dd/MM/yyyy HH:mm"),
+      phase: "installation",
+      offset: 0,
+    });
+
     return dates;
   }
 
   if (mode === "after") {
+    dates.push({
+      date: base,
+      label: format(base, "dd/MM/yyyy HH:mm"),
+      phase: "installation",
+      offset: 0,
+    });
+
     for (let i = 1; i <= 7; i++) {
       const date = addDays(base, i);
       dates.push({
@@ -220,6 +253,7 @@ function buildDailyDates(
         offset: i,
       });
     }
+
     return dates;
   }
 
@@ -253,6 +287,13 @@ function buildDailyDates(
   return dates;
 }
 
+function buildExact24HourWindow(date: Date): { fromDate: Date; toDate: Date } {
+  const fromDate = new Date(date.getTime());
+  const toDate = new Date(date.getTime() + 24 * 60 * 60 * 1000 - 1);
+
+  return { fromDate, toDate };
+}
+
 export async function fetchEnvironmentMonitoringDaily(
   filters: EnvironmentDailyFilters
 ): Promise<EnvironmentMonitoringDailyResult> {
@@ -260,10 +301,7 @@ export async function fetchEnvironmentMonitoringDaily(
 
   const rows = await Promise.all(
     days.map(async ({ date, label, phase, offset }) => {
-      const fromDate = new Date(date);
-      const toDate = new Date(date);
-      toDate.setDate(toDate.getDate() + 1);
-      toDate.setMilliseconds(toDate.getMilliseconds() - 1);
+      const { fromDate, toDate } = buildExact24HourWindow(date);
 
       const summary = await fetchEnvironmentMonitoringSummary({
         environment: filters.environment,
@@ -284,7 +322,7 @@ export async function fetchEnvironmentMonitoringDaily(
     })
   );
 
-  const totals = rows.reduce(
+  const totalsBase = rows.reduce(
     (acc, row) => {
       acc.technicalErrors += row.technicalErrors;
       acc.executions += row.executions;
@@ -297,6 +335,14 @@ export async function fetchEnvironmentMonitoringDaily(
       meanSpanDuration: 0,
     }
   );
+
+  const totals = {
+    technicalErrors: totalsBase.technicalErrors,
+    executions: totalsBase.executions,
+    meanSpanDuration: rows.length
+      ? totalsBase.meanSpanDuration / rows.length
+      : 0,
+  };
 
   return {
     environment: filters.environment,

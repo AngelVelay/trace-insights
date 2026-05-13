@@ -1,9 +1,10 @@
-import type {
-  AggregationBucket,
-  AggregationResponse,
-  MetricsFilters,
-  MetricRow,
-  OperationType,
+import {
+  CHANNEL_CODES,
+  type AggregationBucket,
+  type AggregationResponse,
+  type MetricsFilters,
+  type MetricRow,
+  type OperationType,
 } from "@/types/bbva";
 import { dateRangeToNano } from "./dateUtils";
 import {
@@ -13,6 +14,7 @@ import {
   buildInvokerTxFilter,
   buildInvokerLibraryFilter,
   buildUtilityTypeFilter,
+  buildChannelCodeFilter,
 } from "./urlBuilder";
 import {
   apiRequest,
@@ -38,6 +40,13 @@ type InvokerTxBucket = AggregationBucket & {
 
 export type AwsInformSiteName = "LIVE-02" | "LIVE-04";
 
+export interface AwsInformChannelCodeOption {
+  channelCode: string;
+  executionsLive02: number;
+  executionsLive04: number;
+  totalExecutions: number;
+}
+
 export interface AwsInformSiteMetrics {
   site: AwsInformSiteName;
   invokerTx: string;
@@ -60,6 +69,7 @@ export interface AwsInformComparisonRow {
 }
 
 export interface AwsInformComparisonResult {
+  channelCode?: string;
   rows: AwsInformComparisonRow[];
   summary: {
     totalInvokerTx: number;
@@ -82,8 +92,16 @@ function extractBuckets(
 
 async function fetchAggregation(
   filters: MetricsFilters,
-  metricSet: "technical-dashboard" | "utility-metric-set",
-  aggregate: "name" | "invokerLibrary" | "utilitytype" | "invokedparam",
+  metricSet:
+    | "technical-dashboard"
+    | "utility-metric-set"
+    | "functional-dashboard",
+  aggregate:
+    | "name"
+    | "invokerLibrary"
+    | "utilitytype"
+    | "invokedparam"
+    | "channel-code",
   operations: OperationType[],
   q: string
 ): Promise<AggregationBucket[]> {
@@ -98,7 +116,7 @@ async function fetchAggregation(
     aggregate,
     q,
     operations,
-    baseUrl: "https://mu.live-02.nextgen.igrupobbva"
+    baseUrl: "https://mu.live-02.nextgen.igrupobbva",
   });
 
   const headers = buildAuthHeaders(filters.bearerToken);
@@ -112,12 +130,60 @@ async function fetchAggregation(
   return extractBuckets(res);
 }
 
+function removeChannelCodeFilter(filters: MetricsFilters): MetricsFilters {
+  const { channelCode, ...rest } = filters;
+  return rest;
+}
+
+async function fetchAggregationWithChannelFallback(
+  filters: MetricsFilters,
+  metricSet:
+    | "technical-dashboard"
+    | "utility-metric-set"
+    | "functional-dashboard",
+  aggregate:
+    | "name"
+    | "invokerLibrary"
+    | "utilitytype"
+    | "invokedparam"
+    | "channel-code",
+  operations: OperationType[],
+  buildQuery: (filters: MetricsFilters) => string
+): Promise<AggregationBucket[]> {
+  const result = await fetchAggregation(
+    filters,
+    metricSet,
+    aggregate,
+    operations,
+    buildQuery(filters)
+  );
+
+  if (result.length > 0 || !filters.channelCode?.trim()) {
+    return result;
+  }
+
+  console.warn(
+    `[metricsService] ${metricSet}/${aggregate} vino vacío con channel-code=${filters.channelCode}. Reintentando sin channel-code.`
+  );
+
+  const fallbackFilters = removeChannelCodeFilter(filters);
+
+  return fetchAggregation(
+    fallbackFilters,
+    metricSet,
+    aggregate,
+    operations,
+    buildQuery(fallbackFilters)
+  );
+}
+
 export async function fetchInvokerTxBuckets(
   filters: MetricsFilters
 ): Promise<InvokerTxBucket[]> {
   const q = buildCompoundQuery(
     filters.site ? buildSiteFilter(filters.site) : undefined,
-    filters.invokerTx ? `("name" == "${filters.invokerTx.trim()}")` : undefined
+    filters.invokerTx ? `("name" == "${filters.invokerTx.trim()}")` : undefined,
+    getChannelCodeFilter(filters)
   );
 
   return (await fetchAggregation(
@@ -138,17 +204,17 @@ export async function fetchInvokerLibraryBuckets(
   filters: MetricsFilters,
   invokerTx: string
 ): Promise<AggregationBucket[]> {
-  const q = buildCompoundQuery(
-    filters.site ? buildSiteFilter(filters.site) : undefined,
-    buildInvokerTxFilter(invokerTx)
-  );
-
-  return fetchAggregation(
+  return fetchAggregationWithChannelFallback(
     filters,
     "utility-metric-set",
     "invokerLibrary",
     ["count:utility_count"],
-    q
+    (currentFilters) =>
+      buildCompoundQuery(
+        currentFilters.site ? buildSiteFilter(currentFilters.site) : undefined,
+        buildInvokerTxFilter(invokerTx),
+        getChannelCodeFilter(currentFilters)
+      )
   );
 }
 
@@ -157,19 +223,21 @@ export async function fetchUtilityTypeBuckets(
   invokerTx: string,
   invokerLibrary: string
 ): Promise<AggregationBucket[]> {
-  const q = buildCompoundQuery(
-    filters.site ? buildSiteFilter(filters.site) : undefined,
-    buildInvokerTxFilter(invokerTx),
-    buildInvokerLibraryFilter(invokerLibrary),
-    filters.utilityType ? buildUtilityTypeFilter(filters.utilityType) : undefined
-  );
-
-  return fetchAggregation(
+  return fetchAggregationWithChannelFallback(
     filters,
     "utility-metric-set",
     "utilitytype",
     ["count:utility_count"],
-    q
+    (currentFilters) =>
+      buildCompoundQuery(
+        currentFilters.site ? buildSiteFilter(currentFilters.site) : undefined,
+        buildInvokerTxFilter(invokerTx),
+        buildInvokerLibraryFilter(invokerLibrary),
+        currentFilters.utilityType
+          ? buildUtilityTypeFilter(currentFilters.utilityType)
+          : undefined,
+        getChannelCodeFilter(currentFilters)
+      )
   );
 }
 
@@ -179,14 +247,7 @@ export async function fetchInvokedParamBuckets(
   invokerLibrary: string,
   utilitytype: string
 ): Promise<AggregationBucket[]> {
-  const q = buildCompoundQuery(
-    filters.site ? buildSiteFilter(filters.site) : undefined,
-    buildInvokerTxFilter(invokerTx),
-    buildInvokerLibraryFilter(invokerLibrary),
-    buildUtilityTypeFilter(utilitytype)
-  );
-
-  return fetchAggregation(
+  return fetchAggregationWithChannelFallback(
     filters,
     "utility-metric-set",
     "invokedparam",
@@ -196,7 +257,14 @@ export async function fetchInvokedParamBuckets(
       "mean:utility_duration",
       "max:utility_duration",
     ],
-    q
+    (currentFilters) =>
+      buildCompoundQuery(
+        currentFilters.site ? buildSiteFilter(currentFilters.site) : undefined,
+        buildInvokerTxFilter(invokerTx),
+        buildInvokerLibraryFilter(invokerLibrary),
+        buildUtilityTypeFilter(utilitytype),
+        getChannelCodeFilter(currentFilters)
+      )
   );
 }
 
@@ -208,6 +276,29 @@ export async function fetchInvokerTxList(
   return buckets
     .map((b) => b.bucket?.name ?? "")
     .filter((v): v is string => Boolean(v?.trim()));
+}
+
+/**
+ * Lista fija de channel-code.
+ *
+ * Se usa para pintar el dropdown sin depender de que el endpoint
+ * functional-dashboard:listAggregations devuelva buckets.
+ */
+export async function fetchAwsInformChannelCodes(): Promise<
+  AwsInformChannelCodeOption[]
+> {
+  return CHANNEL_CODES.map((item) => ({
+    channelCode: item.channelCode,
+    executionsLive02: 0,
+    executionsLive04: 0,
+    totalExecutions: item.executions,
+  })).sort((a, b) => {
+    if (b.totalExecutions !== a.totalExecutions) {
+      return b.totalExecutions - a.totalExecutions;
+    }
+
+    return a.channelCode.localeCompare(b.channelCode);
+  });
 }
 
 function parseTraceJumps(trace: string): number {
@@ -247,6 +338,7 @@ async function fetchAwsSiteMetricsForInvokerTx(
 
   try {
     const buckets = await fetchInvokerTxBuckets(scopedFilters);
+
     const bucket = buckets.find(
       (item) => String(item.bucket?.name ?? "").trim() === invokerTx
     );
@@ -256,6 +348,7 @@ async function fetchAwsSiteMetricsForInvokerTx(
     }
 
     let trace = "-";
+
     try {
       trace = await fetchTraceSummaryForInvokerTx(scopedFilters, invokerTx);
     } catch {
@@ -274,7 +367,10 @@ async function fetchAwsSiteMetricsForInvokerTx(
     };
   } catch (error) {
     const message =
-      error instanceof Error ? `Error consultando ${site}: ${error.message}` : `Error consultando ${site}`;
+      error instanceof Error
+        ? `Error consultando ${site}: ${error.message}`
+        : `Error consultando ${site}`;
+
     return emptyAwsSiteMetrics(site, invokerTx, message);
   }
 }
@@ -284,6 +380,7 @@ export async function fetchAwsInformComparison(params: {
   fromDate: Date;
   toDate: Date;
   bearerToken?: string;
+  channelCode?: string;
   onProgress?: (message: string) => void;
   onProgressValue?: (value: number) => void;
 }): Promise<AwsInformComparisonResult> {
@@ -292,9 +389,15 @@ export async function fetchAwsInformComparison(params: {
     fromDate,
     toDate,
     bearerToken,
+    channelCode,
     onProgress,
     onProgressValue,
   } = params;
+
+  const cleanChannelCode =
+    channelCode && channelCode !== "all"
+      ? channelCode.trim()
+      : undefined;
 
   const uniqueInvokerTx = Array.from(
     new Set(
@@ -306,6 +409,7 @@ export async function fetchAwsInformComparison(params: {
 
   if (!uniqueInvokerTx.length) {
     return {
+      channelCode: cleanChannelCode?.toUpperCase(),
       rows: [],
       summary: {
         totalInvokerTx: 0,
@@ -325,6 +429,7 @@ export async function fetchAwsInformComparison(params: {
     fromDate,
     toDate,
     bearerToken,
+    channelCode: cleanChannelCode,
     searchMode: "pipeline",
     iterateAllInvokerTx: true,
   };
@@ -335,22 +440,36 @@ export async function fetchAwsInformComparison(params: {
   const advanceProgress = (message: string) => {
     doneTasks += 1;
     onProgress?.(message);
-    onProgressValue?.(Math.max(1, Math.min(100, Math.round((doneTasks / totalTasks) * 100))));
+    onProgressValue?.(
+      Math.max(1, Math.min(100, Math.round((doneTasks / totalTasks) * 100)))
+    );
   };
 
-  onProgress?.("Preparando informe AWS...");
+  onProgress?.(
+    cleanChannelCode
+      ? `Preparando informe AWS para canal ${cleanChannelCode}...`
+      : "Preparando informe AWS..."
+  );
   onProgressValue?.(3);
 
   const rows = await Promise.all(
     uniqueInvokerTx.map(async (invokerTx) => {
       const [live02, live04] = await Promise.all([
         awsInformLimiter(async () => {
-          const data = await fetchAwsSiteMetricsForInvokerTx(baseFilters, "LIVE-02", invokerTx);
+          const data = await fetchAwsSiteMetricsForInvokerTx(
+            baseFilters,
+            "LIVE-02",
+            invokerTx
+          );
           advanceProgress(`${invokerTx} · LIVE-02 listo`);
           return data;
         }),
         awsInformLimiter(async () => {
-          const data = await fetchAwsSiteMetricsForInvokerTx(baseFilters, "LIVE-04", invokerTx);
+          const data = await fetchAwsSiteMetricsForInvokerTx(
+            baseFilters,
+            "LIVE-04",
+            invokerTx
+          );
           advanceProgress(`${invokerTx} · LIVE-04 listo`);
           return data;
         }),
@@ -374,27 +493,53 @@ export async function fetchAwsInformComparison(params: {
     return totalB - totalA;
   });
 
-  const totalExecutionsLive02 = rows.reduce((sum, row) => sum + row.live02.executions, 0);
-  const totalExecutionsLive04 = rows.reduce((sum, row) => sum + row.live04.executions, 0);
-  const totalErrorsLive02 = rows.reduce((sum, row) => sum + row.live02.technicalErrors, 0);
-  const totalErrorsLive04 = rows.reduce((sum, row) => sum + row.live04.technicalErrors, 0);
-  const totalJumpsLive02 = rows.reduce((sum, row) => sum + row.live02.jumps, 0);
-  const totalJumpsLive04 = rows.reduce((sum, row) => sum + row.live04.jumps, 0);
+  const totalExecutionsLive02 = rows.reduce(
+    (sum, row) => sum + row.live02.executions,
+    0
+  );
+
+  const totalExecutionsLive04 = rows.reduce(
+    (sum, row) => sum + row.live04.executions,
+    0
+  );
+
+  const totalErrorsLive02 = rows.reduce(
+    (sum, row) => sum + row.live02.technicalErrors,
+    0
+  );
+
+  const totalErrorsLive04 = rows.reduce(
+    (sum, row) => sum + row.live04.technicalErrors,
+    0
+  );
+
+  const totalJumpsLive02 = rows.reduce(
+    (sum, row) => sum + row.live02.jumps,
+    0
+  );
+
+  const totalJumpsLive04 = rows.reduce(
+    (sum, row) => sum + row.live04.jumps,
+    0
+  );
 
   const avgDurationLive02 =
     rows.length > 0
-      ? rows.reduce((sum, row) => sum + row.live02.meanDurationMs, 0) / rows.length
+      ? rows.reduce((sum, row) => sum + row.live02.meanDurationMs, 0) /
+      rows.length
       : 0;
 
   const avgDurationLive04 =
     rows.length > 0
-      ? rows.reduce((sum, row) => sum + row.live04.meanDurationMs, 0) / rows.length
+      ? rows.reduce((sum, row) => sum + row.live04.meanDurationMs, 0) /
+      rows.length
       : 0;
 
   onProgress?.("Informe AWS generado");
   onProgressValue?.(100);
 
   return {
+    channelCode: cleanChannelCode?.toUpperCase(),
     rows,
     summary: {
       totalInvokerTx: rows.length,
@@ -414,7 +559,11 @@ export async function fetchFullMetrics(
   baseFilters: MetricsFilters,
   onProgress?: (msg: string) => void
 ): Promise<MetricRow[]> {
-  onProgress?.("Obteniendo invokerTx desde MU...");
+  onProgress?.(
+    baseFilters.channelCode
+      ? `Obteniendo invokerTx desde MU para canal ${baseFilters.channelCode}...`
+      : "Obteniendo invokerTx desde MU..."
+  );
 
   const invokerTxBuckets = await fetchInvokerTxBuckets(baseFilters);
 
@@ -436,6 +585,7 @@ export async function fetchFullMetrics(
 
   for (const row of txMetaRows) {
     if (seenInvokerTx.has(row.meta.invokerTx)) continue;
+
     seenInvokerTx.add(row.meta.invokerTx);
     uniqueTxMetaRows.push(row);
   }
@@ -470,10 +620,15 @@ export async function fetchFullMetrics(
 
     const libraries = libraryBuckets
       .map((lb) => ({
-        invokerLibrary: lb.bucket?.invokerLibrary ?? lb.bucket?.name ?? "",
+        invokerLibrary: String(
+          lb.bucket?.invokerLibrary ??
+          lb.bucket?.["invokerLibrary"] ??
+          lb.bucket?.name ??
+          ""
+        ).trim(),
         count: Number(lb.values?.count_utility_count ?? 0),
       }))
-      .filter((x) => x.invokerLibrary.trim().length > 0);
+      .filter((x) => x.invokerLibrary.length > 0);
 
     const utilityTypeBlocks: Array<{
       invokerLibrary: string;
@@ -499,10 +654,15 @@ export async function fetchFullMetrics(
       let utilityTypes = utilityTypeBuckets
         .map((ub) => ({
           invokerLibrary: library.invokerLibrary,
-          utilitytype: ub.bucket?.utilitytype ?? ub.bucket?.name ?? "",
+          utilitytype: String(
+            ub.bucket?.utilitytype ??
+            ub.bucket?.["utilitytype"] ??
+            ub.bucket?.name ??
+            ""
+          ).trim(),
           count: Number(ub.values?.count_utility_count ?? 0),
         }))
-        .filter((x) => x.utilitytype.trim().length > 0);
+        .filter((x) => x.utilitytype.length > 0);
 
       if (baseFilters.utilityType) {
         utilityTypes = utilityTypes.filter(
@@ -524,17 +684,23 @@ export async function fetchFullMetrics(
           .map((ip) => ({
             invokerLibrary: library.invokerLibrary,
             utilitytype: utility.utilitytype,
-            invokedparam: ip.bucket?.invokedparam ?? ip.bucket?.name ?? "",
+            invokedparam: String(
+              ip.bucket?.invokedparam ??
+              ip.bucket?.["invokedparam"] ??
+              ip.bucket?.name ??
+              ""
+            ).trim(),
             count: Number(ip.values?.count_utility_count ?? 0),
             maxDuration: Number(ip.values?.max_utility_duration ?? 0),
           }))
-          .filter((x) => x.invokedparam.trim().length > 0);
+          .filter((x) => x.invokedparam.length > 0);
 
         invokedParamBlocks.push(...invokedParams);
       }
     }
 
     onProgress?.(`Obteniendo trace de ${txMeta.invokerTx}...`);
+
     const trace = await fetchTraceSummaryForInvokerTx(
       baseFilters,
       txMeta.invokerTx
@@ -542,6 +708,7 @@ export async function fetchFullMetrics(
 
     rows.push({
       site: txRow.site,
+      channelCode: getChannelCodeLabel(baseFilters) ?? "-",
       invokerTx: JSON.stringify(txMeta),
       invokerLibrary: libraries.length ? JSON.stringify(libraries) : "-",
       utilitytype: utilityTypeBlocks.length
@@ -559,6 +726,22 @@ export async function fetchFullMetrics(
   }
 
   return rows;
+}
+
+function getChannelCodeFilter(filters: MetricsFilters): string | undefined {
+  if (filters.channelCodes?.length) {
+    return buildChannelCodeFilter(filters.channelCodes);
+  }
+
+  return buildChannelCodeFilter(filters.channelCode);
+}
+
+function getChannelCodeLabel(filters: MetricsFilters): string | undefined {
+  if (filters.channelCodes?.length) {
+    return filters.channelCodes.join(", ");
+  }
+
+  return filters.channelCode;
 }
 
 export async function fetchUtilityTypes(): Promise<string[]> {

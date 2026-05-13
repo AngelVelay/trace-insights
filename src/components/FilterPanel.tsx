@@ -1,9 +1,5 @@
-import { useMemo, useState, useEffect } from "react";
-import {
-  Search,
-  Eye,
-  EyeOff,
-} from "lucide-react";
+import { useMemo, useState, useEffect, useCallback } from "react";
+import { Search, Eye, EyeOff, RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -18,6 +14,7 @@ import {
 import { toast } from "sonner";
 
 import {
+  CHANNEL_CODES,
   UTILITY_TYPES,
   type MetricsFilters,
 } from "@/types/bbva";
@@ -46,7 +43,7 @@ export default function FilterPanel({
     return localStorage.getItem(BEARER_STORAGE_KEY) || "";
   });
   const [showToken, setShowToken] = useState(false);
-
+  const [channelCodes, setChannelCodes] = useState<string[]>([]);
   useEffect(() => {
     localStorage.setItem(BEARER_STORAGE_KEY, bearerToken);
   }, [bearerToken]);
@@ -54,6 +51,16 @@ export default function FilterPanel({
   const isDateRangeValid = useMemo(() => {
     return fromDate.getTime() <= toDate.getTime();
   }, [fromDate, toDate]);
+
+  const toggleChannelCode = (code: string) => {
+    setChannelCodes((current) => {
+      if (current.includes(code)) {
+        return current.filter((item) => item !== code);
+      }
+
+      return [...current, code];
+    });
+  };
 
   const handleSearch = () => {
     if (!bearerToken.trim()) {
@@ -75,6 +82,8 @@ export default function FilterPanel({
       site,
       invokerTx: invokerTx.trim() || undefined,
       utilityType: utilityType === "all" ? undefined : utilityType,
+      channelCodes: channelCodes.length ? channelCodes : undefined,
+      channelCode: channelCodes.length === 1 ? channelCodes[0] : undefined,
       limit:
         useAllInvokerTx || !Number.isFinite(parsedLimit) || parsedLimit <= 0
           ? undefined
@@ -148,7 +157,9 @@ export default function FilterPanel({
         </div>
 
         <div className="space-y-1.5">
-          <Label className="text-xs text-muted-foreground">Límite invokerTx</Label>
+          <Label className="text-xs text-muted-foreground">
+            Límite invokerTx
+          </Label>
           <Select value={limit} onValueChange={setLimit}>
             <SelectTrigger className="font-mono text-xs">
               <SelectValue placeholder="Selecciona límite" />
@@ -165,7 +176,9 @@ export default function FilterPanel({
         </div>
 
         <div className="space-y-1.5 md:col-span-2">
-          <Label className="text-xs text-muted-foreground">InvokerTx específico</Label>
+          <Label className="text-xs text-muted-foreground">
+            InvokerTx específico
+          </Label>
           <Input
             type="text"
             placeholder="Ej. KUSUT07201ZZ"
@@ -186,6 +199,66 @@ export default function FilterPanel({
           <Label className="text-xs text-muted-foreground">Fecha fin</Label>
           <DateTimePicker value={toDate} onChange={setToDate} />
         </div>
+      </div>
+
+      <div className="space-y-1.5">
+        <Label className="text-xs text-muted-foreground">Channel-code</Label>
+
+        <div className="max-h-56 overflow-y-auto rounded-xl border border-border bg-background p-3">
+          <label className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-xs hover:bg-muted">
+            <input
+              type="checkbox"
+              checked={!channelCodes.length}
+              onChange={() => setChannelCodes([])}
+            />
+            <span className="font-mono">Todos los canales</span>
+          </label>
+
+          {CHANNEL_CODES.map((item) => (
+            <label
+              key={item.channelCode}
+              className="flex cursor-pointer items-center justify-between gap-3 rounded-lg px-2 py-1.5 text-xs hover:bg-muted"
+            >
+              <span className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={channelCodes.includes(item.channelCode)}
+                  onChange={() => toggleChannelCode(item.channelCode)}
+                />
+                <span className="font-mono">{item.channelCode}</span>
+              </span>
+
+              <div className="block w-full">
+                {/* Definimos una altura máxima fija y permitimos el scroll vertical */}
+                <div className="max-h-32 overflow-y-auto pr-2 custom-scrollbar">
+                  <div className="flex flex-wrap gap-2">
+                    {item.aap
+                      .toLocaleString()
+                      .split(",")
+                      .map((id, index) => {
+                        const cleanId = id.trim();
+                        return (
+                          <span
+                            // SOLUCIÓN AL ERROR DE KEY: Combinamos el valor con el índice
+                            key={`${cleanId}-${index}`}
+                            className="inline-flex items-center rounded-md bg-muted px-2 py-1 text-xs font-medium text-muted-foreground ring-1 ring-inset ring-gray-500/10"
+                          >
+                            {cleanId}
+                          </span>
+                        );
+                      })}
+                  </div>
+                </div>
+              </div>
+            </label>
+          ))}
+        </div>
+
+        <p className="text-xs text-muted-foreground">
+          {channelCodes.length
+            ? `Canales seleccionados: ${channelCodes.join(", ")}`
+            : "Sin selección: se consultan todos los canales."}
+        </p>
       </div>
 
       {!isDateRangeValid && (

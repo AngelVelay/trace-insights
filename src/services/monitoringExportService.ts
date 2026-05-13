@@ -405,6 +405,7 @@ function buildAwsInformMetricsMatrix(
 } {
   const headers = [
     "InvokerTx",
+    "Canal",
     "LIVE-02 Exec",
     "LIVE-02 Errors",
     "LIVE-02 Jumps",
@@ -421,6 +422,7 @@ function buildAwsInformMetricsMatrix(
 
   const rows = result.rows.map((row) => [
     row.invokerTx,
+    result.channelCode || "-",
     row.live02.executions,
     row.live02.technicalErrors,
     row.live02.jumps,
@@ -444,10 +446,11 @@ function buildAwsInformTracesMatrix(
   headers: string[];
   rows: Primitive[][];
 } {
-  const headers = ["InvokerTx", "Trace LIVE-02", "Trace LIVE-04"];
+  const headers = ["InvokerTx", "Canal", "Trace LIVE-02", "Trace LIVE-04"];
 
   const rows = result.rows.map((row) => [
     row.invokerTx,
+    result.channelCode || "-",
     row.live02.trace || "-",
     row.live04.trace || "-",
   ]);

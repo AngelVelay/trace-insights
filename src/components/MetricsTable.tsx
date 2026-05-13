@@ -485,8 +485,9 @@ export default function MetricsTable({
               <SortableHead label="Site" field="site" />
               <SortableHead label="InvokerTx" field="invokerTx" />
               <TableHead className="whitespace-nowrap text-xs">
-                InvokerTx simple
+                Transaccion
               </TableHead>
+              <SortableHead label="Canal" field="channelCode" />
               <SortableHead label="Library" field="invokerLibrary" />
               <SortableHead label="UtilityType" field="utilitytype" />
               <SortableHead label="InvokedParam" field="invokedparam" />

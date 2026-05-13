@@ -44,6 +44,38 @@ export function buildUtilityTypeFilter(
   return `("utilitytype" == "${utilityType.trim()}")`;
 }
 
+export function buildChannelCodeFilter(
+  channelCode?: string | string[]
+): string | undefined {
+  const codes = Array.isArray(channelCode)
+    ? channelCode
+    : channelCode
+      ? [channelCode]
+      : [];
+
+  const cleanCodes = Array.from(
+    new Set(
+      codes
+        .map((code) => String(code).trim())
+        .filter((code) => code && code !== "all")
+    )
+  );
+
+  if (!cleanCodes.length) {
+    return undefined;
+  }
+
+  const clauses = cleanCodes.map(
+    (code) => `("properties.channel-code" == "${code}")`
+  );
+
+  if (clauses.length === 1) {
+    return clauses[0];
+  }
+
+  return `(${clauses.join(" or ")})`;
+}
+
 export function buildCompoundQuery(
   ...parts: Array<string | undefined | null | false>
 ): string {

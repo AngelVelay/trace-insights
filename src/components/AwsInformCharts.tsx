@@ -336,7 +336,7 @@ const live02VsAwsPercent = useMemo(() => {
 
   return (
     <div className="space-y-6">
-      <section className="grid gap-4 lg:grid-cols-4">
+      <section className="grid gap-4 lg:grid-cols-5">
         <div className="rounded-2xl border border-border/70 bg-card/95 p-5 shadow-sm">
   <div className="mb-3 text-xs text-muted-foreground">Calculadora porcentaje de ejecuciones AWS</div>
 
@@ -399,6 +399,16 @@ const live02VsAwsPercent = useMemo(() => {
           <div className="text-xs text-emerald-300">Ejecuciones LIVE-04</div>
           <div className="mt-3 font-mono text-3xl font-bold">
             {totalLive04Executions.toLocaleString()}
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-border/70 bg-card/95 p-5 shadow-sm">
+          <div className="text-xs text-muted-foreground">Canal consultado</div>
+          <div className="mt-3 font-mono text-3xl font-bold text-amber-300">
+            {result.channelCode || "-"}
+          </div>
+          <div className="mt-2 text-[11px] text-muted-foreground">
+            Aplicado en LIVE-02 y LIVE-04
           </div>
         </div>
 
@@ -619,6 +629,9 @@ const live02VsAwsPercent = useMemo(() => {
                     <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       InvokerTx
                     </th>
+                    <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      Canal
+                    </th>
 
                     <th className="bg-cyan-500/10 px-4 py-4 text-xs font-semibold uppercase tracking-wide text-cyan-300">
                       LIVE-02 Exec
@@ -656,6 +669,7 @@ const live02VsAwsPercent = useMemo(() => {
                       className="border-b border-border/50 align-top transition-colors hover:bg-muted/30"
                     >
                       <td className="px-4 py-4 font-mono font-semibold">{row.invokerTx}</td>
+                      <td className="px-4 py-4 font-mono">{result.channelCode || "-"}</td>
 
                       <td className="bg-cyan-500/5 px-4 py-4 font-mono">
                         {row.live02.executions.toLocaleString()}
@@ -697,6 +711,9 @@ const live02VsAwsPercent = useMemo(() => {
                     <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       InvokerTx
                     </th>
+                    <th className="px-4 py-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      Canal
+                    </th>
                     <th className="bg-cyan-500/10 px-4 py-4 text-xs font-semibold uppercase tracking-wide text-cyan-300">
                       Trace LIVE-02
                     </th>
@@ -713,6 +730,7 @@ const live02VsAwsPercent = useMemo(() => {
                       className="border-b border-border/50 align-top transition-colors hover:bg-muted/30"
                     >
                       <td className="px-4 py-4 font-mono font-semibold">{row.invokerTx}</td>
+                      <td className="px-4 py-4 font-mono">{result.channelCode || "-"}</td>
                       <td className="bg-cyan-500/5 px-4 py-4">
                         <pre className="max-w-[560px] whitespace-pre-wrap break-words font-mono text-[11px] leading-5 text-cyan-100">
                           {row.live02.trace || "-"}

@@ -8,12 +8,18 @@ import type {
   NormalizedSpan,
   ClassifiedTraces,
 } from "@/types/bbva";
+import { CHANNEL_CODES } from "@/types/bbva";
 import {
   fetchFullMetrics,
   fetchAwsInformComparison,
   type AwsInformComparisonResult,
+  type AwsInformChannelCodeOption,
 } from "@/services/metricsService";
-import { fetchSpans, classifySpans } from "@/services/tracesService";
+import {
+  fetchSpans,
+  classifySpans,
+  normalizeSpans,
+} from "@/services/tracesService";
 import {
   buildAwsMonitoringCsv,
   copyAwsMonitoringToSheets,
@@ -31,6 +37,13 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { toast } from "sonner";
 import { Copy, Download, Search } from "lucide-react";
 
@@ -56,11 +69,34 @@ type InvokedParamItem = {
   maxDuration: number;
 };
 
+const AWS_CHANNEL_OPTIONS: AwsInformChannelCodeOption[] = CHANNEL_CODES.map(
+  (item) => ({
+    channelCode: item.channelCode,
+    executionsLive02: 0,
+    executionsLive04: 0,
+    totalExecutions: item.executions,
+  }),
+);
+
+function getDefaultFromDate() {
+  const date = new Date();
+  date.setDate(date.getDate() - 28);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function getDefaultToDate() {
+  const date = new Date();
+  date.setHours(23, 59, 59, 999);
+  return date;
+}
+
 function parseInvokerTxItem(value: unknown): InvokerTxItem | null {
   if (!value || typeof value !== "string") return null;
 
   try {
     const parsed = JSON.parse(value) as Partial<InvokerTxItem>;
+
     if (!parsed?.invokerTx) return null;
 
     return {
@@ -80,6 +116,7 @@ function parseUtilityTypeItems(value: unknown): UtilityTypeItem[] {
 
   try {
     const parsed = JSON.parse(value);
+
     if (!Array.isArray(parsed)) return [];
 
     return parsed
@@ -99,6 +136,7 @@ function parseInvokedParamItems(value: unknown): InvokedParamItem[] {
 
   try {
     const parsed = JSON.parse(value);
+
     if (!Array.isArray(parsed)) return [];
 
     return parsed
@@ -115,46 +153,131 @@ function parseInvokedParamItems(value: unknown): InvokedParamItem[] {
   }
 }
 
-function computeKPIs(rows: MetricRow[], spans: NormalizedSpan[]): KPISummary {
+function emptyClassifiedTraces(): ClassifiedTraces {
+  return {
+    InterBackendCics: [],
+    APIInternalConnectorImpl: [],
+    Jdbc: [],
+    DaasMongoConnector: [],
+    other: [],
+  };
+}
+
+function normalizeClassifiedTraces(value: unknown): ClassifiedTraces {
+  const empty = emptyClassifiedTraces();
+
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return empty;
+  }
+
+  const data = value as Partial<ClassifiedTraces>;
+
+  return {
+    InterBackendCics: Array.isArray(data.InterBackendCics)
+      ? data.InterBackendCics
+      : [],
+    APIInternalConnectorImpl: Array.isArray(data.APIInternalConnectorImpl)
+      ? data.APIInternalConnectorImpl
+      : [],
+    Jdbc: Array.isArray(data.Jdbc) ? data.Jdbc : [],
+    DaasMongoConnector: Array.isArray(data.DaasMongoConnector)
+      ? data.DaasMongoConnector
+      : [],
+    other: Array.isArray(data.other) ? data.other : [],
+  };
+}
+
+function countSpansByType(spans: NormalizedSpan[], keywords: string[]): number {
+  return spans.filter((span) => {
+    const source = [
+      span.name,
+      span.utilityType,
+      span.properties?.utilitytype,
+      span.properties?.invokerLibrary,
+      span.properties?.invokedparam,
+      span.properties?.databaseInstance,
+      span.properties?.collection,
+      span.properties?.databaseQuery,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+
+    return keywords.some((keyword) => source.includes(keyword.toLowerCase()));
+  }).length;
+}
+
+function computeKPIs(
+  rows: MetricRow[] = [],
+  spans: NormalizedSpan[] = [],
+): KPISummary {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const safeSpans = Array.isArray(spans) ? spans : [];
+
   const invokerTxs = new Set<string>();
   const utilityTypes = new Set<string>();
   const invokedParams = new Set<string>();
 
   let totalExecutions = 0;
 
-  for (const row of rows) {
+  for (const row of safeRows) {
     const tx = parseInvokerTxItem(row.invokerTx);
+
     if (tx?.invokerTx) {
       invokerTxs.add(tx.invokerTx);
       totalExecutions += Number(tx.sum_num_executions ?? 0);
     }
 
     const utilityItems = parseUtilityTypeItems(row.utilitytype);
+
     for (const item of utilityItems) {
-      utilityTypes.add(item.utilitytype);
+      if (item.utilitytype) {
+        utilityTypes.add(item.utilitytype);
+      }
     }
 
     const invokedItems = parseInvokedParamItems(row.invokedparam);
+
     for (const item of invokedItems) {
-      invokedParams.add(item.invokedparam);
+      if (item.invokedparam) {
+        invokedParams.add(item.invokedparam);
+      }
     }
   }
 
-  const totalDur = spans.reduce((s, sp) => s + sp.durationMs, 0);
-  const classified = classifySpans(spans);
+  const totalDur = safeSpans.reduce((sum, span) => {
+    return sum + Number(span.durationMs ?? 0);
+  }, 0);
+
+  const classified = normalizeClassifiedTraces(classifySpans(safeSpans));
+
+  const traceApiConnectors =
+    classified.APIInternalConnectorImpl.length ||
+    countSpansByType(safeSpans, ["APIInternalConnectorImpl"]);
+
+  const traceCics =
+    classified.InterBackendCics.length ||
+    countSpansByType(safeSpans, ["InterBackendCics", "CICS"]);
+
+  const traceJdbc =
+    classified.Jdbc.length || countSpansByType(safeSpans, ["Jdbc"]);
+
+  const traceMongo =
+    classified.DaasMongoConnector.length ||
+    countSpansByType(safeSpans, ["DaasMongoConnector", "Mongo"]);
 
   return {
     totalInvokerTx: invokerTxs.size,
     totalUtilityTypes: utilityTypes.size,
     totalInvokedParams: invokedParams.size,
     totalExecutions,
-    totalJumps: spans.length,
+    totalJumps: safeSpans.length,
     totalDurationMs: totalDur,
-    avgDurationMs: spans.length > 0 ? totalDur / spans.length : 0,
-    traceApiConnectors: classified.APIInternalConnectorImpl.length,
-    traceCics: classified.InterBackendCics.length,
-    traceJdbc: classified.Jdbc.length,
-    traceMongo: classified.DaasMongoConnector.length,
+    avgDurationMs: safeSpans.length > 0 ? totalDur / safeSpans.length : 0,
+    traceApiConnectors,
+    traceCics,
+    traceJdbc,
+    traceMongo,
   };
 }
 
@@ -164,8 +287,8 @@ function parseInvokerTxList(text: string): string[] {
       text
         .split(/[\n,;\t ]+/g)
         .map((item) => item.trim().toUpperCase())
-        .filter(Boolean)
-    )
+        .filter(Boolean),
+    ),
   );
 }
 
@@ -173,9 +296,11 @@ function downloadCsvFile(content: string, filename: string) {
   const blob = new Blob([content], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
+
   link.href = url;
   link.download = filename;
   link.click();
+
   URL.revokeObjectURL(url);
 }
 
@@ -188,14 +313,27 @@ export default function Dashboard() {
   const [spans, setSpans] = useState<NormalizedSpan[]>([]);
   const [classified, setClassified] = useState<ClassifiedTraces | null>(null);
   const [metricsError, setMetricsError] = useState<string | null>(null);
-  const [selectedInvokerTx, setSelectedInvokerTx] = useState<string | null>(null);
+  const [selectedInvokerTx, setSelectedInvokerTx] = useState<string | null>(
+    null,
+  );
   const [lastFilters, setLastFilters] = useState<MetricsFilters | null>(null);
 
   const [awsInformInvokerTxInput, setAwsInformInvokerTxInput] = useState("");
-  const [awsInformFromDate, setAwsInformFromDate] = useState<Date>(new Date());
-  const [awsInformToDate, setAwsInformToDate] = useState<Date>(new Date());
-  const [awsInformResult, setAwsInformResult] = useState<AwsInformComparisonResult | null>(null);
+  const [awsInformFromDate, setAwsInformFromDate] = useState<Date>(() =>
+    getDefaultFromDate(),
+  );
+  const [awsInformToDate, setAwsInformToDate] = useState<Date>(() =>
+    getDefaultToDate(),
+  );
+  const [awsInformResult, setAwsInformResult] =
+    useState<AwsInformComparisonResult | null>(null);
   const [awsInformError, setAwsInformError] = useState<string | null>(null);
+
+  const [awsInformChannelCode, setAwsInformChannelCode] = useState(
+    AWS_CHANNEL_OPTIONS[0]?.channelCode ?? "MG",
+  );
+  const [awsInformChannelCodes] =
+    useState<AwsInformChannelCodeOption[]>(AWS_CHANNEL_OPTIONS);
 
   const { bearerToken, setBearerToken } = useBearerToken();
 
@@ -223,25 +361,31 @@ export default function Dashboard() {
   }, [rows, selectedInvokerTx]);
 
   const loadSpansForInvokerTx = useCallback(
-    async (filters: MetricsFilters, invokerTx: string, metricRows: MetricRow[]) => {
+    async (
+      filters: MetricsFilters,
+      invokerTx: string,
+      metricRows: MetricRow[],
+    ) => {
       setProgress(`Obteniendo trazas de ${invokerTx}...`);
       setProgressValue(70);
 
-      const allSpans = await fetchSpans(filters, invokerTx);
-      setSpans(allSpans);
+    const rawSpans = await fetchSpans(filters, invokerTx);
+const normalizedSpans = normalizeSpans(rawSpans ?? []);
 
-      const cls = classifySpans(allSpans);
-      setClassified(cls);
+setSpans(normalizedSpans);
 
-      const scopedRows = metricRows.filter((row) => {
-        const meta = parseInvokerTxItem(row.invokerTx);
-        return meta?.invokerTx === invokerTx;
-      });
+const cls = normalizeClassifiedTraces(classifySpans(normalizedSpans));
+setClassified(cls);
 
-      setKpis(computeKPIs(scopedRows, allSpans));
+const scopedRows = metricRows.filter((row) => {
+  const meta = parseInvokerTxItem(row.invokerTx);
+  return meta?.invokerTx === invokerTx;
+});
+
+setKpis(computeKPIs(scopedRows, normalizedSpans));
       setProgressValue(100);
     },
-    []
+    [],
   );
 
   const handleSearch = useCallback(
@@ -266,17 +410,18 @@ export default function Dashboard() {
           setProgressValue((current) => Math.min(65, current + 8));
         });
 
-        setRows(metricRows);
+        const safeRows = Array.isArray(metricRows) ? metricRows : [];
+        setRows(safeRows);
 
-        if (metricRows.length > 0) {
-          const firstMeta = parseInvokerTxItem(metricRows[0].invokerTx);
+        if (safeRows.length > 0) {
+          const firstMeta = parseInvokerTxItem(safeRows[0].invokerTx);
           const firstInvokerTx = firstMeta?.invokerTx ?? null;
 
           if (firstInvokerTx) {
             setSelectedInvokerTx(firstInvokerTx);
-            await loadSpansForInvokerTx(filters, firstInvokerTx, metricRows);
+            await loadSpansForInvokerTx(filters, firstInvokerTx, safeRows);
           } else {
-            setKpis(computeKPIs(metricRows, []));
+            setKpis(computeKPIs(safeRows, []));
             setProgressValue(100);
           }
         } else {
@@ -284,7 +429,7 @@ export default function Dashboard() {
           setProgressValue(100);
         }
 
-        toast.success(`Consulta completada: ${metricRows.length} métricas`);
+        toast.success(`Consulta completada: ${safeRows.length} métricas`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Error desconocido";
         console.error("[Dashboard] Error:", err);
@@ -296,7 +441,7 @@ export default function Dashboard() {
         setTimeout(() => setProgressValue(0), 200);
       }
     },
-    [loadSpansForInvokerTx, setBearerToken]
+    [loadSpansForInvokerTx, setBearerToken],
   );
 
   const handleSelectInvokerTx = useCallback(
@@ -319,7 +464,7 @@ export default function Dashboard() {
         setTimeout(() => setProgressValue(0), 200);
       }
     },
-    [lastFilters, loadSpansForInvokerTx, rows]
+    [lastFilters, loadSpansForInvokerTx, rows],
   );
 
   const handleAwsInformSearch = useCallback(async () => {
@@ -332,6 +477,11 @@ export default function Dashboard() {
 
     if (!invokerTxList.length) {
       toast.error("Captura al menos un invokerTx.");
+      return;
+    }
+
+    if (!awsInformChannelCode.trim()) {
+      toast.error("Selecciona un channel-code.");
       return;
     }
 
@@ -352,6 +502,7 @@ export default function Dashboard() {
         fromDate: awsInformFromDate,
         toDate: awsInformToDate,
         bearerToken: bearerToken.trim(),
+        channelCode: awsInformChannelCode.trim(),
         onProgress: setProgress,
         onProgressValue: setProgressValue,
       });
@@ -369,6 +520,7 @@ export default function Dashboard() {
       setTimeout(() => setProgressValue(0), 200);
     }
   }, [
+    awsInformChannelCode,
     awsInformFromDate,
     awsInformInvokerTxInput,
     awsInformToDate,
@@ -383,7 +535,7 @@ export default function Dashboard() {
 
     downloadCsvFile(
       buildAwsMonitoringCsv(rows),
-      `aws_monitoreo_metricas_${Date.now()}.csv`
+      `aws_monitoreo_metricas_${Date.now()}.csv`,
     );
     toast.success("CSV de métricas descargado.");
   };
@@ -410,7 +562,7 @@ export default function Dashboard() {
 
     downloadCsvFile(
       buildAwsMonitoringCsv(rows),
-      `aws_monitoreo_graficas_${Date.now()}.csv`
+      `aws_monitoreo_graficas_${Date.now()}.csv`,
     );
     toast.success("CSV de gráficas descargado.");
   };
@@ -423,7 +575,9 @@ export default function Dashboard() {
 
     try {
       await copyAwsMonitoringToSheets(rows);
-      toast.success("Datos de gráficas copiados. Ya puedes pegarlos en Google Sheets.");
+      toast.success(
+        "Datos de gráficas copiados. Ya puedes pegarlos en Google Sheets.",
+      );
     } catch {
       toast.error("No se pudo copiar al portapapeles.");
     }
@@ -437,7 +591,7 @@ export default function Dashboard() {
 
     downloadCsvFile(
       buildAwsInformCsv(awsInformResult, view),
-      `inform_aws_${view}_${Date.now()}.csv`
+      `inform_aws_${view}_${Date.now()}.csv`,
     );
     toast.success(`CSV de Inform AWS (${view}) descargado.`);
   };
@@ -450,7 +604,9 @@ export default function Dashboard() {
 
     try {
       await copyAwsInformToSheets(awsInformResult, view);
-      toast.success(`Inform AWS (${view}) copiado. Ya puedes pegarlo en Google Sheets.`);
+      toast.success(
+        `Inform AWS (${view}) copiado. Ya puedes pegarlo en Google Sheets.`,
+      );
     } catch {
       toast.error("No se pudo copiar al portapapeles.");
     }
@@ -474,12 +630,15 @@ export default function Dashboard() {
             <TabsTrigger value="charts" className="text-xs">
               Gráficas
             </TabsTrigger>
+
             <TabsTrigger value="metrics" className="text-xs">
               Métricas ({rows.length})
             </TabsTrigger>
+
             <TabsTrigger value="traces" className="text-xs">
               Trazas ({spans.length})
             </TabsTrigger>
+
             <TabsTrigger value="inform-aws" className="text-xs">
               Inform AWS
             </TabsTrigger>
@@ -564,14 +723,21 @@ export default function Dashboard() {
                   <Label className="text-xs font-medium text-muted-foreground">
                     Lista de invokerTx
                   </Label>
+
                   <Textarea
                     value={awsInformInvokerTxInput}
-                    onChange={(e) => setAwsInformInvokerTxInput(e.target.value.toUpperCase())}
+                    onChange={(event) =>
+                      setAwsInformInvokerTxInput(
+                        event.target.value.toUpperCase(),
+                      )
+                    }
                     placeholder={`Ejemplo:\nKSKRT00201ZZ\nMMCDT01901MX\nMCNHTWEF01MX`}
                     className="min-h-[160px] rounded-xl font-mono text-xs"
                   />
+
                   <p className="text-xs text-muted-foreground">
-                    Puedes pegar uno por línea, separados por coma, espacio o punto y coma.
+                    Puedes pegar uno por línea, separados por coma, espacio o
+                    punto y coma.
                   </p>
                 </div>
 
@@ -579,28 +745,63 @@ export default function Dashboard() {
                   <Label className="text-xs font-medium text-muted-foreground">
                     Fecha inicio
                   </Label>
-                  <DateTimePicker value={awsInformFromDate} onChange={setAwsInformFromDate} />
+
+                  <DateTimePicker
+                    value={awsInformFromDate}
+                    onChange={setAwsInformFromDate}
+                  />
                 </div>
 
                 <div className="space-y-2">
                   <Label className="text-xs font-medium text-muted-foreground">
                     Fecha fin
                   </Label>
-                  <DateTimePicker value={awsInformToDate} onChange={setAwsInformToDate} />
+
+                  <DateTimePicker
+                    value={awsInformToDate}
+                    onChange={setAwsInformToDate}
+                  />
                 </div>
 
                 <div className="space-y-2">
                   <Label className="text-xs font-medium text-muted-foreground">
+                    Channel-code
                   </Label>
-                  <div className="flex h-11 items-center rounded-xl border border-border bg-muted/30 px-3 text-xs text-muted-foreground">
-                  </div>
+
+                  <Select
+                    value={awsInformChannelCode}
+                    onValueChange={setAwsInformChannelCode}
+                    disabled={loading}
+                  >
+                    <SelectTrigger className="h-11 rounded-xl font-mono text-xs">
+                      <SelectValue placeholder="Selecciona channel-code" />
+                    </SelectTrigger>
+
+                    <SelectContent>
+                      {awsInformChannelCodes.map((item) => (
+                        <SelectItem
+                          key={item.channelCode}
+                          value={item.channelCode}
+                        >
+                          {item.channelCode} ·{" "}
+                          {item.totalExecutions.toLocaleString()} exec
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+
+                  <p className="text-xs text-muted-foreground">
+                    Se enviará como{" "}
+                    <span className="font-mono">properties.channel-code</span>{" "}
+                    en LIVE-02 y LIVE-04.
+                  </p>
                 </div>
               </div>
 
               <div className="mt-6 flex flex-wrap gap-3">
                 <Button
                   onClick={handleAwsInformSearch}
-                  disabled={loading}
+                  disabled={loading || !awsInformChannelCode}
                   className="h-11 rounded-xl px-5"
                 >
                   <Search className="mr-2 h-4 w-4" />
@@ -609,6 +810,9 @@ export default function Dashboard() {
 
                 <div className="flex h-11 items-center rounded-xl border border-border bg-muted/20 px-4 text-xs text-muted-foreground">
                   Consulta comparativa en LIVE-02 y LIVE-04
+                  {awsInformChannelCode
+                    ? ` · Canal ${awsInformChannelCode}`
+                    : ""}
                 </div>
               </div>
             </section>
