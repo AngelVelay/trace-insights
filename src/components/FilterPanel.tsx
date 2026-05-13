@@ -39,6 +39,7 @@ export default function FilterPanel({
   const [utilityType, setUtilityType] = useState("all");
   const [limit, setLimit] = useState("all");
   const [invokerTx, setInvokerTx] = useState("");
+  const [channelSearch, setChannelSearch] = useState("");
   const [bearerToken, setBearerToken] = useState(() => {
     return localStorage.getItem(BEARER_STORAGE_KEY) || "";
   });
@@ -51,6 +52,28 @@ export default function FilterPanel({
   const isDateRangeValid = useMemo(() => {
     return fromDate.getTime() <= toDate.getTime();
   }, [fromDate, toDate]);
+
+  const filteredChannelCodes = useMemo(() => {
+    const q = channelSearch.trim().toLowerCase();
+
+    if (!q) return CHANNEL_CODES;
+
+    return CHANNEL_CODES.filter((item) => {
+      const channelCode = item.channelCode.toLowerCase();
+      const name = String(item.name ?? "").toLowerCase();
+
+      const appsText = (item.applications ?? [])
+        .map((app) => {
+          return [app.channel, app.name, app.aap].filter(Boolean).join(" ");
+        })
+        .join(" ")
+        .toLowerCase();
+
+      return (
+        channelCode.includes(q) || name.includes(q) || appsText.includes(q)
+      );
+    });
+  }, [channelSearch]);
 
   const toggleChannelCode = (code: string) => {
     setChannelCodes((current) => {
@@ -145,8 +168,10 @@ export default function FilterPanel({
             <SelectTrigger className="font-mono text-xs">
               <SelectValue placeholder="Auto / Todos" />
             </SelectTrigger>
+
             <SelectContent>
               <SelectItem value="all">Auto / Todos</SelectItem>
+
               {UTILITY_TYPES.map((ut) => (
                 <SelectItem key={ut} value={ut}>
                   {ut}
@@ -200,58 +225,87 @@ export default function FilterPanel({
           <DateTimePicker value={toDate} onChange={setToDate} />
         </div>
       </div>
-
       <div className="space-y-1.5">
         <Label className="text-xs text-muted-foreground">Channel-code</Label>
 
-        <div className="max-h-56 overflow-y-auto rounded-xl border border-border bg-background p-3">
-          <label className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-xs hover:bg-muted">
-            <input
-              type="checkbox"
-              checked={!channelCodes.length}
-              onChange={() => setChannelCodes([])}
-            />
-            <span className="font-mono">Todos los canales</span>
-          </label>
+        <div className="rounded-xl border border-border bg-background p-3">
+          <Input
+            value={channelSearch}
+            onChange={(event) => setChannelSearch(event.target.value)}
+            placeholder="Buscar canal, aplicación o AAP..."
+            className="mb-3 h-9 font-mono text-xs"
+          />
 
-          {CHANNEL_CODES.map((item) => (
-            <label
-              key={item.channelCode}
-              className="flex cursor-pointer items-center justify-between gap-3 rounded-lg px-2 py-1.5 text-xs hover:bg-muted"
-            >
-              <span className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={channelCodes.includes(item.channelCode)}
-                  onChange={() => toggleChannelCode(item.channelCode)}
-                />
-                <span className="font-mono">{item.channelCode}</span>
-              </span>
-
-              <div className="block w-full">
-                {/* Definimos una altura máxima fija y permitimos el scroll vertical */}
-                <div className="max-h-32 overflow-y-auto pr-2 custom-scrollbar">
-                  <div className="flex flex-wrap gap-2">
-                    {item.aap
-                      .toLocaleString()
-                      .split(",")
-                      .map((id, index) => {
-                        const cleanId = id.trim();
-                        return (
-                          <span
-                            // SOLUCIÓN AL ERROR DE KEY: Combinamos el valor con el índice
-                            key={`${cleanId}-${index}`}
-                            className="inline-flex items-center rounded-md bg-muted px-2 py-1 text-xs font-medium text-muted-foreground ring-1 ring-inset ring-gray-500/10"
-                          >
-                            {cleanId}
-                          </span>
-                        );
-                      })}
-                  </div>
-                </div>
-              </div>
+          <div className="max-h-56 overflow-y-auto">
+            <label className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-xs hover:bg-muted">
+              <input
+                type="checkbox"
+                checked={!channelCodes.length}
+                onChange={() => setChannelCodes([])}
+              />
+              <span className="font-mono">Todos los canales</span>
             </label>
-          ))}
+
+            {filteredChannelCodes.length === 0 ? (
+              <div className="px-2 py-4 text-center text-xs text-muted-foreground">
+                No se encontraron canales.
+              </div>
+            ) : (
+              filteredChannelCodes.map((item) => {
+                const apps = item.applications ?? [];
+
+                return (
+                  <label
+                    key={item.channelCode}
+                    className="block cursor-pointer rounded-lg px-2 py-2 text-xs hover:bg-muted"
+                    title={apps
+                      .map(
+                        (app) =>
+                          `${app.channel} · ${app.name} · AAP ${app.aap}`,
+                      )
+                      .join("\n")}
+                  >
+                    <div className="flex items-start gap-2">
+                      <input
+                        type="checkbox"
+                        className="mt-1"
+                        checked={channelCodes.includes(item.channelCode)}
+                        onChange={() => toggleChannelCode(item.channelCode)}
+                      />
+
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono font-semibold">
+                            {item.channelCode}
+                          </span>
+
+                          <span className="truncate text-muted-foreground">
+                            {apps.length > 0
+                              ? apps.map((app) => app.name).join(" · ")
+                              : item.name}
+                          </span>
+                        </div>
+
+                        {apps.length > 0 && (
+                          <div className="mt-1 max-h-14 overflow-hidden pl-1 text-[11px] leading-4 text-muted-foreground">
+                            {apps.map((app) => (
+                              <div
+                                key={`${item.channelCode}-${app.aap}-${app.name}`}
+                                className="truncate"
+                              >
+                                <span className="font-mono">AAP {app.aap}</span>
+                                <span> · {app.name}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </label>
+                );
+              })
+            )}
+          </div>
         </div>
 
         <p className="text-xs text-muted-foreground">

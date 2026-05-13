@@ -106,9 +106,8 @@ function parseLibraryItems(value: unknown): LibraryItem[] {
           count: Number(obj.count ?? 0),
         };
       })
-      .filter(
-        (item): item is LibraryItem =>
-          Boolean(item && item.invokerLibrary.length > 0)
+      .filter((item): item is LibraryItem =>
+        Boolean(item && item.invokerLibrary.length > 0),
       );
   }
 
@@ -143,13 +142,10 @@ function parseUtilityTypeItems(value: unknown): UtilityTypeItem[] {
           count: Number(obj.count ?? 0),
         };
       })
-      .filter(
-        (item): item is UtilityTypeItem =>
-          Boolean(
-            item &&
-              item.invokerLibrary.length > 0 &&
-              item.utilitytype.length > 0
-          )
+      .filter((item): item is UtilityTypeItem =>
+        Boolean(
+          item && item.invokerLibrary.length > 0 && item.utilitytype.length > 0,
+        ),
       );
   }
 
@@ -186,14 +182,13 @@ function parseInvokedParamItems(value: unknown): InvokedParamItem[] {
           maxDuration: Number(obj.maxDuration ?? 0),
         };
       })
-      .filter(
-        (item): item is InvokedParamItem =>
-          Boolean(
-            item &&
-              item.invokerLibrary.length > 0 &&
-              item.utilitytype.length > 0 &&
-              item.invokedparam.length > 0
-          )
+      .filter((item): item is InvokedParamItem =>
+        Boolean(
+          item &&
+          item.invokerLibrary.length > 0 &&
+          item.utilitytype.length > 0 &&
+          item.invokedparam.length > 0,
+        ),
       );
   }
 
@@ -233,7 +228,9 @@ function utilityTypeSearchText(value: unknown): string {
   const items = parseUtilityTypeItems(value);
   if (!items.length) return String(value ?? "");
   return items
-    .map((item) => `${item.invokerLibrary} ${item.utilitytype} ${item.count} exec`)
+    .map(
+      (item) => `${item.invokerLibrary} ${item.utilitytype} ${item.count} exec`,
+    )
     .join(" ")
     .toLowerCase();
 }
@@ -244,7 +241,7 @@ function invokedParamSearchText(value: unknown): string {
   return items
     .map(
       (item) =>
-        `${item.invokerLibrary} ${item.utilitytype} ${item.invokedparam} ${item.count} exec ${item.maxDuration}`
+        `${item.invokerLibrary} ${item.utilitytype} ${item.invokedparam} ${item.count} exec ${item.maxDuration}`,
     )
     .join(" ")
     .toLowerCase();
@@ -263,7 +260,7 @@ function formatExecDuration(ms: number): string {
 function renderInvokerTxCell(
   value: unknown,
   selectedInvokerTx?: string | null,
-  onSelectInvokerTx?: (invokerTx: string) => void
+  onSelectInvokerTx?: (invokerTx: string) => void,
 ) {
   const item = parseInvokerTxItem(value);
 
@@ -279,7 +276,7 @@ function renderInvokerTxCell(
       onClick={() => onSelectInvokerTx?.(item.invokerTx)}
       className={cn(
         "w-full rounded-md p-2 text-left transition-colors hover:bg-muted/50",
-        isSelected && "bg-primary/10 ring-1 ring-primary/30"
+        isSelected && "bg-primary/10 ring-1 ring-primary/30",
       )}
     >
       <div className="font-bold text-primary">{item.invokerTx}</div>
@@ -359,9 +356,7 @@ function renderInvokedParamCell(value: unknown) {
           <div className="font-bold">{item.invokerLibrary}</div>
           <div>{item.utilitytype}</div>
           <div>{item.invokedparam}</div>
-          <div className="italic text-muted-foreground">
-            {item.count} exec
-          </div>
+          <div className="italic text-muted-foreground">{item.count} exec</div>
           <div className="italic text-muted-foreground">
             {formatExecDuration(item.maxDuration)}
           </div>
@@ -394,12 +389,20 @@ export default function MetricsTable({
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("invokerTx");
   const [sortAsc, setSortAsc] = useState(true);
+  const [channelFilter, setChannelFilter] = useState("all");
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
 
     const result = rows.filter((r) => {
+      const rowChannel = String(r.channelCode ?? "").trim();
+
+      if (channelFilter !== "all" && rowChannel !== channelFilter) {
+        return false;
+      }
+
       const site = String(r.site ?? "").toLowerCase();
+      const channelCode = String(r.channelCode ?? "").toLowerCase();
       const invokerTx = invokerTxSearchText(r.invokerTx);
       const invokedparam = invokedParamSearchText(r.invokedparam);
       const utilitytype = utilityTypeSearchText(r.utilitytype);
@@ -408,6 +411,7 @@ export default function MetricsTable({
 
       return (
         site.includes(q) ||
+        channelCode.includes(q) ||
         invokerTx.includes(q) ||
         invokedparam.includes(q) ||
         utilitytype.includes(q) ||
@@ -430,7 +434,15 @@ export default function MetricsTable({
     });
 
     return result;
-  }, [rows, search, sortKey, sortAsc]);
+  }, [rows, search, sortKey, sortAsc, channelFilter]);
+
+  const availableChannels = useMemo(() => {
+    return Array.from(
+      new Set(
+        rows.map((row) => String(row.channelCode ?? "").trim()).filter(Boolean),
+      ),
+    ).sort((a, b) => a.localeCompare(b));
+  }, [rows]);
 
   const hasSearch = search.trim().length > 0;
 
@@ -455,7 +467,13 @@ export default function MetricsTable({
     }
   };
 
-  const SortableHead = ({ label, field }: { label: string; field: SortKey }) => (
+  const SortableHead = ({
+    label,
+    field,
+  }: {
+    label: string;
+    field: SortKey;
+  }) => (
     <TableHead
       className="cursor-pointer select-none whitespace-nowrap text-xs"
       onClick={() => toggleSort(field)}
@@ -469,13 +487,27 @@ export default function MetricsTable({
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <Input
           placeholder="Buscar..."
           className="max-w-xs font-mono text-xs"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
+
+        <select
+          value={channelFilter}
+          onChange={(e) => setChannelFilter(e.target.value)}
+          className="h-10 rounded-md border border-input bg-background px-3 py-2 font-mono text-xs text-foreground"
+        >
+          <option value="all">Todos los canales</option>
+
+          {availableChannels.map((channel) => (
+            <option key={channel} value={channel}>
+              {channel}
+            </option>
+          ))}
+        </select>
       </div>
 
       <div className="max-h-[500px] overflow-x-auto overflow-y-auto">
@@ -499,7 +531,7 @@ export default function MetricsTable({
             {filtered.length === 0 ? (
               <TableRow>
                 <TableCell
-                  colSpan={7}
+                  colSpan={8}
                   className="py-8 text-center text-muted-foreground"
                 >
                   {emptyStateMessage}
@@ -507,19 +539,40 @@ export default function MetricsTable({
               </TableRow>
             ) : (
               filtered.map((row, i) => (
-                <TableRow key={`${i}`} className="font-mono text-xs">
-                  <TableCell>{row.site}</TableCell>
+                <TableRow
+                  key={`${row.site}-${row.channelCode ?? "all"}-${i}`}
+                  className="font-mono text-xs"
+                >
+                  <TableCell>{row.site || "-"}</TableCell>
+
                   <TableCell>
                     {renderInvokerTxCell(
                       row.invokerTx,
                       selectedInvokerTx,
-                      onSelectInvokerTx
+                      onSelectInvokerTx,
                     )}
                   </TableCell>
-                  <TableCell>{renderSimpleInvokerTxCell(row.invokerTx)}</TableCell>
+
+                  <TableCell>
+                    {renderSimpleInvokerTxCell(row.invokerTx)}
+                  </TableCell>
+
+                  <TableCell>
+                    <span className="rounded-md border border-border bg-muted/40 px-2 py-1 font-mono text-xs">
+                      {row.channelCode || "-"}
+                    </span>
+                  </TableCell>
+
                   <TableCell>{renderLibraryCell(row.invokerLibrary)}</TableCell>
-                  <TableCell>{renderUtilityTypeCell(row.utilitytype)}</TableCell>
-                  <TableCell>{renderInvokedParamCell(row.invokedparam)}</TableCell>
+
+                  <TableCell>
+                    {renderUtilityTypeCell(row.utilitytype)}
+                  </TableCell>
+
+                  <TableCell>
+                    {renderInvokedParamCell(row.invokedparam)}
+                  </TableCell>
+
                   <TableCell className="min-w-[420px]">
                     {renderTraceCell(row.trace)}
                   </TableCell>

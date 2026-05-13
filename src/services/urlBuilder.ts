@@ -37,35 +37,38 @@ export function buildInvokerLibraryFilter(
   return `("invokerLibrary" == "${invokerLibrary.trim()}")`;
 }
 
-export function buildUtilityTypeFilter(
-  utilityType?: string
-): string | undefined {
-  if (!utilityType?.trim()) return undefined;
-  return `("utilitytype" == "${utilityType.trim()}")`;
+export function buildUtilityTypeFilter(utilityType?: string): string | undefined {
+  const cleanUtilityType = utilityType?.trim();
+
+  if (!cleanUtilityType || cleanUtilityType === "all") {
+    return undefined;
+  }
+
+  return `("utilitytype" == "${cleanUtilityType}")`;
 }
 
 export function buildChannelCodeFilter(
   channelCode?: string | string[]
 ): string | undefined {
-  const codes = Array.isArray(channelCode)
+  const rawCodes = Array.isArray(channelCode)
     ? channelCode
     : channelCode
       ? [channelCode]
       : [];
 
-  const cleanCodes = Array.from(
+  const codes = Array.from(
     new Set(
-      codes
+      rawCodes
         .map((code) => String(code).trim())
         .filter((code) => code && code !== "all")
     )
   );
 
-  if (!cleanCodes.length) {
+  if (!codes.length) {
     return undefined;
   }
 
-  const clauses = cleanCodes.map(
+  const clauses = codes.map(
     (code) => `("properties.channel-code" == "${code}")`
   );
 

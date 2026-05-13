@@ -38,6 +38,15 @@ type InvokerTxBucket = AggregationBucket & {
   };
 };
 
+type ChannelCodeBucket = AggregationBucket & {
+  bucket?: AggregationBucket["bucket"] & {
+    "channel-code"?: string;
+  };
+  values?: AggregationBucket["values"] & {
+    sum_num_executions?: number;
+  };
+};
+
 export type AwsInformSiteName = "LIVE-02" | "LIVE-04";
 
 export interface AwsInformChannelCodeOption {
@@ -119,20 +128,66 @@ async function fetchAggregation(
     baseUrl: "https://mu.live-02.nextgen.igrupobbva",
   });
 
-  const headers = buildAuthHeaders(filters.bearerToken);
+  console.log("[MU aggregation URL]", {
+    metricSet,
+    aggregate,
+    operations,
+    q,
+    url,
+  });
 
   const res = await limiter(() =>
     apiRequest<AggregationResponse & { buckets?: AggregationBucket[] }>(url, {
-      headers,
+      headers: buildAuthHeaders(filters.bearerToken),
     })
   );
 
   return extractBuckets(res);
 }
 
+function getSelectedChannelCodes(filters: MetricsFilters): string[] {
+  const codes = filters.channelCodes?.length
+    ? filters.channelCodes
+    : filters.channelCode
+      ? [filters.channelCode]
+      : [];
+
+  return Array.from(
+    new Set(
+      codes
+        .map((code) => String(code).trim())
+        .filter((code) => code && code !== "all")
+    )
+  );
+}
+
+function getChannelCodeFilter(filters: MetricsFilters): string | undefined {
+  const codes = getSelectedChannelCodes(filters);
+  return buildChannelCodeFilter(codes);
+}
+
+function getChannelCodeLabel(filters: MetricsFilters): string {
+  const codes = getSelectedChannelCodes(filters);
+  return codes.length ? codes.join(", ") : "-";
+}
+
+function buildSingleChannelFilters(
+  filters: MetricsFilters,
+  channelCode: string
+): MetricsFilters {
+  return {
+    ...filters,
+    channelCode,
+    channelCodes: undefined,
+  };
+}
+
 function removeChannelCodeFilter(filters: MetricsFilters): MetricsFilters {
-  const { channelCode, ...rest } = filters;
-  return rest;
+  return {
+    ...filters,
+    channelCode: undefined,
+    channelCodes: undefined,
+  };
 }
 
 async function fetchAggregationWithChannelFallback(
@@ -158,12 +213,14 @@ async function fetchAggregationWithChannelFallback(
     buildQuery(filters)
   );
 
-  if (result.length > 0 || !filters.channelCode?.trim()) {
+  if (result.length > 0 || !getSelectedChannelCodes(filters).length) {
     return result;
   }
 
   console.warn(
-    `[metricsService] ${metricSet}/${aggregate} vino vacío con channel-code=${filters.channelCode}. Reintentando sin channel-code.`
+    `[metricsService] ${metricSet}/${aggregate} vino vacío con channel-code=${getSelectedChannelCodes(
+      filters
+    ).join(", ")}. Reintentando sin channel-code.`
   );
 
   const fallbackFilters = removeChannelCodeFilter(filters);
@@ -247,6 +304,8 @@ export async function fetchInvokedParamBuckets(
   invokerLibrary: string,
   utilitytype: string
 ): Promise<AggregationBucket[]> {
+  const selectedUtilityType = filters.utilityType || utilitytype;
+
   return fetchAggregationWithChannelFallback(
     filters,
     "utility-metric-set",
@@ -262,7 +321,9 @@ export async function fetchInvokedParamBuckets(
         currentFilters.site ? buildSiteFilter(currentFilters.site) : undefined,
         buildInvokerTxFilter(invokerTx),
         buildInvokerLibraryFilter(invokerLibrary),
-        buildUtilityTypeFilter(utilitytype),
+        selectedUtilityType
+          ? buildUtilityTypeFilter(selectedUtilityType)
+          : undefined,
         getChannelCodeFilter(currentFilters)
       )
   );
@@ -279,19 +340,19 @@ export async function fetchInvokerTxList(
 }
 
 /**
- * Lista fija de channel-code.
- *
- * Se usa para pintar el dropdown sin depender de que el endpoint
- * functional-dashboard:listAggregations devuelva buckets.
+ * Catálogo local de channel-code.
+ * Ahora se toma desde CHANNEL_CODES en bbva.ts.
  */
-export async function fetchAwsInformChannelCodes(): Promise<
-  AwsInformChannelCodeOption[]
-> {
+export async function fetchAwsInformChannelCodes(_params?: {
+  fromDate: Date;
+  toDate: Date;
+  bearerToken?: string;
+}): Promise<AwsInformChannelCodeOption[]> {
   return CHANNEL_CODES.map((item) => ({
     channelCode: item.channelCode,
     executionsLive02: 0,
     executionsLive04: 0,
-    totalExecutions: item.executions,
+    totalExecutions: item.applications?.length ?? 0,
   })).sort((a, b) => {
     if (b.totalExecutions !== a.totalExecutions) {
       return b.totalExecutions - a.totalExecutions;
@@ -299,6 +360,28 @@ export async function fetchAwsInformChannelCodes(): Promise<
 
     return a.channelCode.localeCompare(b.channelCode);
   });
+}
+
+async function fetchAwsChannelCodeBucketsForSite(
+  filters: Pick<MetricsFilters, "fromDate" | "toDate" | "bearerToken">,
+  site: AwsInformSiteName
+): Promise<ChannelCodeBucket[]> {
+  const baseFilters: MetricsFilters = {
+    fromDate: filters.fromDate,
+    toDate: filters.toDate,
+    bearerToken: filters.bearerToken,
+    searchMode: "pipeline",
+  };
+
+  const q = buildCompoundQuery(buildSiteFilter(site));
+
+  return (await fetchAggregation(
+    baseFilters,
+    "functional-dashboard",
+    "channel-code",
+    ["sum:num_executions"],
+    q
+  )) as ChannelCodeBucket[];
 }
 
 function parseTraceJumps(trace: string): number {
@@ -347,11 +430,21 @@ async function fetchAwsSiteMetricsForInvokerTx(
       return emptyAwsSiteMetrics(site, invokerTx);
     }
 
+    const meanDurationMs = Number(bucket.values?.mean_span_duration ?? 0);
     let trace = "-";
 
     try {
-      trace = await fetchTraceSummaryForInvokerTx(scopedFilters, invokerTx);
-    } catch {
+      trace = await fetchTraceSummaryForInvokerTx(
+        scopedFilters,
+        invokerTx,
+        meanDurationMs
+      );
+    } catch (err) {
+      console.warn("[AWS Inform] Error obteniendo trace", {
+        site,
+        invokerTx,
+        err,
+      });
       trace = "-";
     }
 
@@ -361,7 +454,7 @@ async function fetchAwsSiteMetricsForInvokerTx(
       executions: Number(bucket.values?.sum_num_executions ?? 0),
       technicalErrors: Number(bucket.values?.sum_technical_error ?? 0),
       functionalErrors: Number(bucket.values?.sum_functional_error ?? 0),
-      meanDurationMs: Number(bucket.values?.mean_span_duration ?? 0),
+      meanDurationMs,
       jumps: parseTraceJumps(trace),
       trace,
     };
@@ -430,6 +523,7 @@ export async function fetchAwsInformComparison(params: {
     toDate,
     bearerToken,
     channelCode: cleanChannelCode,
+    channelCodes: cleanChannelCode ? [cleanChannelCode] : undefined,
     searchMode: "pipeline",
     iterateAllInvokerTx: true,
   };
@@ -526,13 +620,13 @@ export async function fetchAwsInformComparison(params: {
   const avgDurationLive02 =
     rows.length > 0
       ? rows.reduce((sum, row) => sum + row.live02.meanDurationMs, 0) /
-      rows.length
+        rows.length
       : 0;
 
   const avgDurationLive04 =
     rows.length > 0
       ? rows.reduce((sum, row) => sum + row.live04.meanDurationMs, 0) /
-      rows.length
+        rows.length
       : 0;
 
   onProgress?.("Informe AWS generado");
@@ -555,13 +649,56 @@ export async function fetchAwsInformComparison(params: {
   };
 }
 
+/**
+ * Consulta principal.
+ *
+ * Si el usuario selecciona varios canales, se ejecuta una consulta por canal
+ * para que la tabla muestre una fila separada:
+ *
+ * TX + MG
+ * TX + 70
+ * TX + LE
+ */
 export async function fetchFullMetrics(
   baseFilters: MetricsFilters,
   onProgress?: (msg: string) => void
 ): Promise<MetricRow[]> {
+  const selectedChannelCodes = getSelectedChannelCodes(baseFilters);
+
+  if (selectedChannelCodes.length > 1) {
+    const allRows: MetricRow[] = [];
+
+    for (const channelCode of selectedChannelCodes) {
+      const channelFilters = buildSingleChannelFilters(
+        baseFilters,
+        channelCode
+      );
+
+      onProgress?.(`Consultando canal ${channelCode}...`);
+
+      const channelRows = await fetchFullMetricsSingleChannel(
+        channelFilters,
+        onProgress
+      );
+
+      allRows.push(...channelRows);
+    }
+
+    return allRows;
+  }
+
+  return fetchFullMetricsSingleChannel(baseFilters, onProgress);
+}
+
+async function fetchFullMetricsSingleChannel(
+  baseFilters: MetricsFilters,
+  onProgress?: (msg: string) => void
+): Promise<MetricRow[]> {
+  const channelLabel = getChannelCodeLabel(baseFilters);
+
   onProgress?.(
-    baseFilters.channelCode
-      ? `Obteniendo invokerTx desde MU para canal ${baseFilters.channelCode}...`
+    channelLabel !== "-"
+      ? `Obteniendo invokerTx desde MU para canal ${channelLabel}...`
       : "Obteniendo invokerTx desde MU..."
   );
 
@@ -570,23 +707,26 @@ export async function fetchFullMetrics(
   const txMetaRows = invokerTxBuckets
     .map((b) => ({
       site: baseFilters.site ?? "",
+      channelCode: channelLabel,
       meta: {
-        invokerTx: b.bucket?.name ?? "",
+        invokerTx: String(b.bucket?.name ?? "").trim(),
         sum_num_executions: Number(b.values?.sum_num_executions ?? 0),
         mean_span_duration: Number(b.values?.mean_span_duration ?? 0),
         sum_functional_error: Number(b.values?.sum_functional_error ?? 0),
         sum_technical_error: Number(b.values?.sum_technical_error ?? 0),
       },
     }))
-    .filter((row) => row.meta.invokerTx.trim().length > 0);
+    .filter((row) => row.meta.invokerTx.length > 0);
 
   const uniqueTxMetaRows: typeof txMetaRows = [];
   const seenInvokerTx = new Set<string>();
 
   for (const row of txMetaRows) {
-    if (seenInvokerTx.has(row.meta.invokerTx)) continue;
+    const key = `${row.channelCode}-${row.meta.invokerTx}`;
 
-    seenInvokerTx.add(row.meta.invokerTx);
+    if (seenInvokerTx.has(key)) continue;
+
+    seenInvokerTx.add(key);
     uniqueTxMetaRows.push(row);
   }
 
@@ -611,7 +751,9 @@ export async function fetchFullMetrics(
   for (const txRow of finalTxMetaRows) {
     const txMeta = txRow.meta;
 
-    onProgress?.(`Obteniendo library de ${txMeta.invokerTx}...`);
+    onProgress?.(
+      `Obteniendo library de ${txMeta.invokerTx} · canal ${txRow.channelCode}...`
+    );
 
     const libraryBuckets = await fetchInvokerLibraryBuckets(
       baseFilters,
@@ -622,9 +764,9 @@ export async function fetchFullMetrics(
       .map((lb) => ({
         invokerLibrary: String(
           lb.bucket?.invokerLibrary ??
-          lb.bucket?.["invokerLibrary"] ??
-          lb.bucket?.name ??
-          ""
+            lb.bucket?.["invokerLibrary"] ??
+            lb.bucket?.name ??
+            ""
         ).trim(),
         count: Number(lb.values?.count_utility_count ?? 0),
       }))
@@ -656,9 +798,9 @@ export async function fetchFullMetrics(
           invokerLibrary: library.invokerLibrary,
           utilitytype: String(
             ub.bucket?.utilitytype ??
-            ub.bucket?.["utilitytype"] ??
-            ub.bucket?.name ??
-            ""
+              ub.bucket?.["utilitytype"] ??
+              ub.bucket?.name ??
+              ""
           ).trim(),
           count: Number(ub.values?.count_utility_count ?? 0),
         }))
@@ -686,9 +828,9 @@ export async function fetchFullMetrics(
             utilitytype: utility.utilitytype,
             invokedparam: String(
               ip.bucket?.invokedparam ??
-              ip.bucket?.["invokedparam"] ??
-              ip.bucket?.name ??
-              ""
+                ip.bucket?.["invokedparam"] ??
+                ip.bucket?.name ??
+                ""
             ).trim(),
             count: Number(ip.values?.count_utility_count ?? 0),
             maxDuration: Number(ip.values?.max_utility_duration ?? 0),
@@ -699,16 +841,27 @@ export async function fetchFullMetrics(
       }
     }
 
-    onProgress?.(`Obteniendo trace de ${txMeta.invokerTx}...`);
+    onProgress?.(
+      `Obteniendo trace de ${txMeta.invokerTx} · canal ${txRow.channelCode}...`
+    );
+
+    const responseTimeMs = Number(txMeta.mean_span_duration ?? 0);
+
+    console.log("[metricsService trace lookup]", {
+      invokerTx: txMeta.invokerTx,
+      channelCode: txRow.channelCode,
+      responseTimeMs,
+    });
 
     const trace = await fetchTraceSummaryForInvokerTx(
       baseFilters,
-      txMeta.invokerTx
+      txMeta.invokerTx,
+      responseTimeMs
     );
 
     rows.push({
       site: txRow.site,
-      channelCode: getChannelCodeLabel(baseFilters) ?? "-",
+      channelCode: txRow.channelCode,
       invokerTx: JSON.stringify(txMeta),
       invokerLibrary: libraries.length ? JSON.stringify(libraries) : "-",
       utilitytype: utilityTypeBlocks.length
@@ -726,22 +879,6 @@ export async function fetchFullMetrics(
   }
 
   return rows;
-}
-
-function getChannelCodeFilter(filters: MetricsFilters): string | undefined {
-  if (filters.channelCodes?.length) {
-    return buildChannelCodeFilter(filters.channelCodes);
-  }
-
-  return buildChannelCodeFilter(filters.channelCode);
-}
-
-function getChannelCodeLabel(filters: MetricsFilters): string | undefined {
-  if (filters.channelCodes?.length) {
-    return filters.channelCodes.join(", ");
-  }
-
-  return filters.channelCode;
 }
 
 export async function fetchUtilityTypes(): Promise<string[]> {
