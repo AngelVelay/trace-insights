@@ -44,7 +44,7 @@ export function buildUtilityTypeFilter(utilityType?: string): string | undefined
     return undefined;
   }
 
-  return `("utilitytype" == "${cleanUtilityType}")`;
+  return `("properties.utilitytype" == "${cleanUtilityType}")`;
 }
 
 export function buildChannelCodeFilter(

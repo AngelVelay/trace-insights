@@ -15,10 +15,7 @@ import {
   type AwsInformComparisonResult,
   type AwsInformChannelCodeOption,
 } from "@/services/metricsService";
-import {
-  fetchSpans,
-  classifySpans,
-} from "@/services/tracesService";
+import { fetchSpans, classifySpans } from "@/services/tracesService";
 import {
   buildAwsMonitoringCsv,
   copyAwsMonitoringToSheets,
@@ -74,7 +71,7 @@ const AWS_CHANNEL_OPTIONS: AwsInformChannelCodeOption[] = CHANNEL_CODES.map(
     executionsLive02: 0,
     executionsLive04: 0,
     totalExecutions: item.applications.length,
-  })
+  }),
 );
 
 function getDefaultFromDate() {
@@ -168,13 +165,17 @@ function emptyClassifiedTraces(): ClassifiedTraces {
     APIInternalConnectorImpl: [],
     Jdbc: [],
     DaasMongoConnector: [],
+    APIExternalConnectorImpl: [],
+    TitanClient: [],
+    GRPCClient: [],
+    Jpa: [],
     other: [],
   };
 }
 
 function computeKPIs(
   rows: MetricRow[] = [],
-  spans: NormalizedSpan[] = []
+  spans: NormalizedSpan[] = [],
 ): KPISummary {
   const safeRows = Array.isArray(rows) ? rows : [];
   const safeSpans = Array.isArray(spans) ? spans : [];
@@ -224,10 +225,16 @@ function computeKPIs(
     totalJumps: safeSpans.length,
     totalDurationMs: totalDur,
     avgDurationMs: safeSpans.length > 0 ? totalDur / safeSpans.length : 0,
+
     traceApiConnectors: classified.APIInternalConnectorImpl.length,
     traceCics: classified.InterBackendCics.length,
     traceJdbc: classified.Jdbc.length,
     traceMongo: classified.DaasMongoConnector.length,
+
+    traceApiExternalConnectors: classified.APIExternalConnectorImpl.length,
+    traceTitanClient: classified.TitanClient.length,
+    traceGrpcClient: classified.GRPCClient.length,
+    traceJpa: classified.Jpa.length,
   };
 }
 
@@ -237,8 +244,8 @@ function parseInvokerTxList(text: string): string[] {
       text
         .split(/[\n,;\t ]+/g)
         .map((item) => item.trim().toUpperCase())
-        .filter(Boolean)
-    )
+        .filter(Boolean),
+    ),
   );
 }
 
@@ -259,7 +266,9 @@ function getRowChannelCode(row?: MetricRow | null): string | undefined {
   return value && value !== "-" ? value : undefined;
 }
 
-function getInvokerTxResponseTimeMs(row?: MetricRow | null): number | undefined {
+function getInvokerTxResponseTimeMs(
+  row?: MetricRow | null,
+): number | undefined {
   const meta = parseInvokerTxItem(row?.invokerTx);
 
   if (!meta) return undefined;
@@ -276,7 +285,7 @@ function getInvokerTxResponseTimeMs(row?: MetricRow | null): number | undefined 
 function findMetricRowForTrace(
   rows: MetricRow[],
   invokerTx: string,
-  channelCode?: string
+  channelCode?: string,
 ): MetricRow | undefined {
   return rows.find((row) => {
     const meta = parseInvokerTxItem(row.invokerTx);
@@ -303,30 +312,29 @@ export default function Dashboard() {
   const [classified, setClassified] = useState<ClassifiedTraces | null>(null);
   const [metricsError, setMetricsError] = useState<string | null>(null);
   const [selectedInvokerTx, setSelectedInvokerTx] = useState<string | null>(
-    null
+    null,
   );
   const [selectedChannelCode, setSelectedChannelCode] = useState<string | null>(
-    null
+    null,
   );
   const [lastFilters, setLastFilters] = useState<MetricsFilters | null>(null);
 
   const [awsInformInvokerTxInput, setAwsInformInvokerTxInput] = useState("");
   const [awsInformFromDate, setAwsInformFromDate] = useState<Date>(() =>
-    getDefaultFromDate()
+    getDefaultFromDate(),
   );
   const [awsInformToDate, setAwsInformToDate] = useState<Date>(() =>
-    getDefaultToDate()
+    getDefaultToDate(),
   );
   const [awsInformResult, setAwsInformResult] =
     useState<AwsInformComparisonResult | null>(null);
   const [awsInformError, setAwsInformError] = useState<string | null>(null);
 
   const [awsInformChannelCode, setAwsInformChannelCode] = useState(
-    AWS_CHANNEL_OPTIONS[0]?.channelCode ?? "MG"
+    AWS_CHANNEL_OPTIONS[0]?.channelCode ?? "MG",
   );
-  const [awsInformChannelCodes] = useState<AwsInformChannelCodeOption[]>(
-    AWS_CHANNEL_OPTIONS
-  );
+  const [awsInformChannelCodes] =
+    useState<AwsInformChannelCodeOption[]>(AWS_CHANNEL_OPTIONS);
 
   const { bearerToken, setBearerToken } = useBearerToken();
 
@@ -338,10 +346,16 @@ export default function Dashboard() {
     totalJumps: 0,
     totalDurationMs: 0,
     avgDurationMs: 0,
+
     traceApiConnectors: 0,
     traceCics: 0,
     traceJdbc: 0,
     traceMongo: 0,
+
+    traceApiExternalConnectors: 0,
+    traceTitanClient: 0,
+    traceGrpcClient: 0,
+    traceJpa: 0,
   });
 
   const selectedRows = useMemo(() => {
@@ -363,7 +377,7 @@ export default function Dashboard() {
       filters: MetricsFilters,
       invokerTx: string,
       metricRows: MetricRow[],
-      channelCode?: string
+      channelCode?: string,
     ) => {
       const scopedFilters: MetricsFilters = channelCode
         ? {
@@ -384,7 +398,8 @@ export default function Dashboard() {
       });
 
       const metricRowForTrace =
-        scopedRows[0] ?? findMetricRowForTrace(metricRows, invokerTx, channelCode);
+        scopedRows[0] ??
+        findMetricRowForTrace(metricRows, invokerTx, channelCode);
 
       const responseTimeMs = getInvokerTxResponseTimeMs(metricRowForTrace);
 
@@ -398,14 +413,14 @@ export default function Dashboard() {
       setProgress(
         `Obteniendo trazas de ${invokerTx}${channelCode ? ` · canal ${channelCode}` : ""}${
           responseTimeMs ? ` · TR ${Math.round(responseTimeMs)}ms` : ""
-        }...`
+        }...`,
       );
       setProgressValue(70);
 
       const normalizedSpans = await fetchSpans(
         scopedFilters,
         invokerTx,
-        responseTimeMs
+        responseTimeMs,
       );
 
       setSpans(normalizedSpans);
@@ -416,7 +431,7 @@ export default function Dashboard() {
       setKpis(computeKPIs(scopedRows, normalizedSpans));
       setProgressValue(100);
     },
-    []
+    [],
   );
 
   const handleSearch = useCallback(
@@ -460,7 +475,7 @@ export default function Dashboard() {
               filters,
               firstInvokerTx,
               safeRows,
-              firstChannelCode
+              firstChannelCode,
             );
           } else {
             setKpis(computeKPIs(safeRows, []));
@@ -485,7 +500,7 @@ export default function Dashboard() {
         setTimeout(() => setProgressValue(0), 200);
       }
     },
-    [loadSpansForInvokerTx, setBearerToken]
+    [loadSpansForInvokerTx, setBearerToken],
   );
 
   const handleSelectInvokerTx = useCallback(
@@ -498,7 +513,7 @@ export default function Dashboard() {
           rows.find((row) => {
             const meta = parseInvokerTxItem(row.invokerTx);
             return meta?.invokerTx === invokerTx;
-          })
+          }),
         );
 
       const cleanChannel =
@@ -508,17 +523,12 @@ export default function Dashboard() {
       setSelectedChannelCode(cleanChannel ?? null);
       setLoading(true);
       setProgress(
-        `Cargando detalle de ${invokerTx}${cleanChannel ? ` · canal ${cleanChannel}` : ""}...`
+        `Cargando detalle de ${invokerTx}${cleanChannel ? ` · canal ${cleanChannel}` : ""}...`,
       );
       setProgressValue(40);
 
       try {
-        await loadSpansForInvokerTx(
-          lastFilters,
-          invokerTx,
-          rows,
-          cleanChannel
-        );
+        await loadSpansForInvokerTx(lastFilters, invokerTx, rows, cleanChannel);
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Error desconocido";
         toast.error(`Error cargando trazas de ${invokerTx}: ${msg}`);
@@ -528,7 +538,7 @@ export default function Dashboard() {
         setTimeout(() => setProgressValue(0), 200);
       }
     },
-    [lastFilters, loadSpansForInvokerTx, rows]
+    [lastFilters, loadSpansForInvokerTx, rows],
   );
 
   const handleAwsInformSearch = useCallback(async () => {
@@ -599,7 +609,7 @@ export default function Dashboard() {
 
     downloadCsvFile(
       buildAwsMonitoringCsv(rows),
-      `aws_monitoreo_metricas_${Date.now()}.csv`
+      `aws_monitoreo_metricas_${Date.now()}.csv`,
     );
     toast.success("CSV de métricas descargado.");
   };
@@ -626,7 +636,7 @@ export default function Dashboard() {
 
     downloadCsvFile(
       buildAwsMonitoringCsv(rows),
-      `aws_monitoreo_graficas_${Date.now()}.csv`
+      `aws_monitoreo_graficas_${Date.now()}.csv`,
     );
     toast.success("CSV de gráficas descargado.");
   };
@@ -640,7 +650,7 @@ export default function Dashboard() {
     try {
       await copyAwsMonitoringToSheets(rows);
       toast.success(
-        "Datos de gráficas copiados. Ya puedes pegarlos en Google Sheets."
+        "Datos de gráficas copiados. Ya puedes pegarlos en Google Sheets.",
       );
     } catch {
       toast.error("No se pudo copiar al portapapeles.");
@@ -655,7 +665,7 @@ export default function Dashboard() {
 
     downloadCsvFile(
       buildAwsInformCsv(awsInformResult, view),
-      `inform_aws_${view}_${Date.now()}.csv`
+      `inform_aws_${view}_${Date.now()}.csv`,
     );
     toast.success(`CSV de Inform AWS (${view}) descargado.`);
   };
@@ -669,7 +679,7 @@ export default function Dashboard() {
     try {
       await copyAwsInformToSheets(awsInformResult, view);
       toast.success(
-        `Inform AWS (${view}) copiado. Ya puedes pegarlo en Google Sheets.`
+        `Inform AWS (${view}) copiado. Ya puedes pegarlo en Google Sheets.`,
       );
     } catch {
       toast.error("No se pudo copiar al portapapeles.");
@@ -802,7 +812,7 @@ export default function Dashboard() {
                     value={awsInformInvokerTxInput}
                     onChange={(event) =>
                       setAwsInformInvokerTxInput(
-                        event.target.value.toUpperCase()
+                        event.target.value.toUpperCase(),
                       )
                     }
                     placeholder={`Ejemplo:\nKSKRT00201ZZ\nMMCDT01901MX\nMCNHTWEF01MX`}
@@ -866,9 +876,7 @@ export default function Dashboard() {
 
                   <p className="text-xs text-muted-foreground">
                     Se enviará como{" "}
-                    <span className="font-mono">
-                      properties.channel-code
-                    </span>{" "}
+                    <span className="font-mono">properties.channel-code</span>{" "}
                     en LIVE-02 y LIVE-04.
                   </p>
                 </div>

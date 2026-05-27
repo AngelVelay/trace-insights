@@ -113,6 +113,7 @@ export const UTILITY_TYPES = [
   "Jpa",
 ] as const;
 
+
 export interface ChannelApplication {
   channel: string;
   name: string;
@@ -125,6 +126,7 @@ export interface ChannelCodeOption {
   channelCode: string;
   name: string;
   aap: number;
+  aaps: number[];
   applications: ChannelApplication[];
 }
 
@@ -1475,6 +1477,7 @@ export type UtilityType = (typeof UTILITY_TYPES)[number];
 
 export interface MetricRow {
   site: string;
+  channelCode?: string;
   invokerTx: string;
   invokerLibrary: string;
   utilitytype: string;
@@ -1484,7 +1487,6 @@ export interface MetricRow {
   min_utility_duration: number;
   mean_utility_duration: number;
   max_utility_duration: number;
-  channelCode?: string;
 }
 
 export interface KPISummary {
@@ -1495,10 +1497,16 @@ export interface KPISummary {
   totalJumps: number;
   totalDurationMs: number;
   avgDurationMs: number;
+
   traceApiConnectors: number;
   traceCics: number;
   traceJdbc: number;
   traceMongo: number;
+
+  traceApiExternalConnectors: number;
+  traceTitanClient: number;
+  traceGrpcClient: number;
+  traceJpa: number;
 }
 
 export interface ClassifiedTraces {
@@ -1506,9 +1514,12 @@ export interface ClassifiedTraces {
   APIInternalConnectorImpl: NormalizedSpan[];
   Jdbc: NormalizedSpan[];
   DaasMongoConnector: NormalizedSpan[];
+  APIExternalConnectorImpl: NormalizedSpan[];
+  TitanClient: NormalizedSpan[];
+  GRPCClient: NormalizedSpan[];
+  Jpa: NormalizedSpan[];
   other: NormalizedSpan[];
 }
-
 export interface ApiConfig {
   baseUrl: string;
   timeout: number;
@@ -1519,11 +1530,16 @@ export interface MetricsFilters {
   fromDate: Date;
   toDate: Date;
   site?: string;
+
   invokerTx?: string;
+  invokerTxList?: string[];
+
   utilityType?: string;
   invokerLibrary?: string;
+
   channelCode?: string;
   channelCodes?: string[];
+
   limit?: number;
   bearerToken?: string;
   searchMode?: SearchMode;
@@ -1536,6 +1552,7 @@ function normalizeChannelCodeKey(channel: string): string[] {
     .map((item) => item.trim())
     .filter(Boolean);
 }
+
 
 export const CHANNEL_CODES: ChannelCodeOption[] = Object.entries(
   GROUPED_CHANNEL_CODES
@@ -1556,12 +1573,15 @@ export const CHANNEL_CODES: ChannelCodeOption[] = Object.entries(
             ? normalizedApplications[0].name
             : `${normalizedApplications.length} aplicaciones`,
         aap: normalizedApplications[0]?.aap ?? 0,
+        aaps: normalizedApplications.map((app) => app.aap),
         applications: normalizedApplications,
       };
     });
   })
   .reduce<ChannelCodeOption[]>((acc, item) => {
-    const existing = acc.find((current) => current.channelCode === item.channelCode);
+    const existing = acc.find(
+      (current) => current.channelCode === item.channelCode
+    );
 
     if (!existing) {
       acc.push(item);
@@ -1569,6 +1589,7 @@ export const CHANNEL_CODES: ChannelCodeOption[] = Object.entries(
     }
 
     existing.applications.push(...item.applications);
+    existing.aaps.push(...item.aaps);
     existing.name = `${existing.applications.length} aplicaciones`;
     existing.aap = existing.applications[0]?.aap ?? existing.aap;
 

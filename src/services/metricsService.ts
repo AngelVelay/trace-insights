@@ -161,6 +161,22 @@ function getSelectedChannelCodes(filters: MetricsFilters): string[] {
   );
 }
 
+function getSelectedInvokerTxList(filters: MetricsFilters): string[] {
+  const list = filters.invokerTxList?.length
+    ? filters.invokerTxList
+    : filters.invokerTx
+      ? [filters.invokerTx]
+      : [];
+
+  return Array.from(
+    new Set(
+      list
+        .map((item) => String(item).trim().toUpperCase())
+        .filter(Boolean)
+    )
+  );
+}
+
 function getChannelCodeFilter(filters: MetricsFilters): string | undefined {
   const codes = getSelectedChannelCodes(filters);
   return buildChannelCodeFilter(codes);
@@ -179,6 +195,17 @@ function buildSingleChannelFilters(
     ...filters,
     channelCode,
     channelCodes: undefined,
+  };
+}
+
+function buildSingleInvokerTxFilters(
+  filters: MetricsFilters,
+  invokerTx: string
+): MetricsFilters {
+  return {
+    ...filters,
+    invokerTx,
+    invokerTxList: undefined,
   };
 }
 
@@ -335,14 +362,10 @@ export async function fetchInvokerTxList(
   const buckets = await fetchInvokerTxBuckets(filters);
 
   return buckets
-    .map((b) => b.bucket?.name ?? "")
-    .filter((v): v is string => Boolean(v?.trim()));
+    .map((bucket) => bucket.bucket?.name ?? "")
+    .filter((value): value is string => Boolean(value?.trim()));
 }
 
-/**
- * Catálogo local de channel-code.
- * Ahora se toma desde CHANNEL_CODES en bbva.ts.
- */
 export async function fetchAwsInformChannelCodes(_params?: {
   fromDate: Date;
   toDate: Date;
@@ -488,9 +511,7 @@ export async function fetchAwsInformComparison(params: {
   } = params;
 
   const cleanChannelCode =
-    channelCode && channelCode !== "all"
-      ? channelCode.trim()
-      : undefined;
+    channelCode && channelCode !== "all" ? channelCode.trim() : undefined;
 
   const uniqueInvokerTx = Array.from(
     new Set(
@@ -620,13 +641,13 @@ export async function fetchAwsInformComparison(params: {
   const avgDurationLive02 =
     rows.length > 0
       ? rows.reduce((sum, row) => sum + row.live02.meanDurationMs, 0) /
-        rows.length
+      rows.length
       : 0;
 
   const avgDurationLive04 =
     rows.length > 0
       ? rows.reduce((sum, row) => sum + row.live04.meanDurationMs, 0) /
-        rows.length
+      rows.length
       : 0;
 
   onProgress?.("Informe AWS generado");
@@ -649,21 +670,47 @@ export async function fetchAwsInformComparison(params: {
   };
 }
 
-/**
- * Consulta principal.
- *
- * Si el usuario selecciona varios canales, se ejecuta una consulta por canal
- * para que la tabla muestre una fila separada:
- *
- * TX + MG
- * TX + 70
- * TX + LE
- */
 export async function fetchFullMetrics(
   baseFilters: MetricsFilters,
   onProgress?: (msg: string) => void
 ): Promise<MetricRow[]> {
   const selectedChannelCodes = getSelectedChannelCodes(baseFilters);
+  const selectedInvokerTxList = getSelectedInvokerTxList(baseFilters);
+
+  if (selectedInvokerTxList.length > 0 && selectedChannelCodes.length > 0) {
+    const allRows: MetricRow[] = [];
+
+    for (const channelCode of selectedChannelCodes) {
+      for (const invokerTx of selectedInvokerTxList) {
+        const filters = buildSingleInvokerTxFilters(
+          buildSingleChannelFilters(baseFilters, channelCode),
+          invokerTx
+        );
+
+        onProgress?.(`Consultando ${invokerTx} · canal ${channelCode}...`);
+
+        const rows = await fetchFullMetricsSingleChannel(filters, onProgress);
+        allRows.push(...rows);
+      }
+    }
+
+    return allRows;
+  }
+
+  if (selectedInvokerTxList.length > 0) {
+    const allRows: MetricRow[] = [];
+
+    for (const invokerTx of selectedInvokerTxList) {
+      const filters = buildSingleInvokerTxFilters(baseFilters, invokerTx);
+
+      onProgress?.(`Consultando ${invokerTx}...`);
+
+      const rows = await fetchFullMetricsSingleChannel(filters, onProgress);
+      allRows.push(...rows);
+    }
+
+    return allRows;
+  }
 
   if (selectedChannelCodes.length > 1) {
     const allRows: MetricRow[] = [];
@@ -705,15 +752,15 @@ async function fetchFullMetricsSingleChannel(
   const invokerTxBuckets = await fetchInvokerTxBuckets(baseFilters);
 
   const txMetaRows = invokerTxBuckets
-    .map((b) => ({
+    .map((bucket) => ({
       site: baseFilters.site ?? "",
       channelCode: channelLabel,
       meta: {
-        invokerTx: String(b.bucket?.name ?? "").trim(),
-        sum_num_executions: Number(b.values?.sum_num_executions ?? 0),
-        mean_span_duration: Number(b.values?.mean_span_duration ?? 0),
-        sum_functional_error: Number(b.values?.sum_functional_error ?? 0),
-        sum_technical_error: Number(b.values?.sum_technical_error ?? 0),
+        invokerTx: String(bucket.bucket?.name ?? "").trim(),
+        sum_num_executions: Number(bucket.values?.sum_num_executions ?? 0),
+        mean_span_duration: Number(bucket.values?.mean_span_duration ?? 0),
+        sum_functional_error: Number(bucket.values?.sum_functional_error ?? 0),
+        sum_technical_error: Number(bucket.values?.sum_technical_error ?? 0),
       },
     }))
     .filter((row) => row.meta.invokerTx.length > 0);
@@ -733,8 +780,10 @@ async function fetchFullMetricsSingleChannel(
   let finalTxMetaRows = uniqueTxMetaRows;
 
   if (baseFilters.invokerTx?.trim()) {
+    const cleanInvokerTx = baseFilters.invokerTx.trim().toUpperCase();
+
     finalTxMetaRows = finalTxMetaRows.filter(
-      (row) => row.meta.invokerTx === baseFilters.invokerTx?.trim()
+      (row) => row.meta.invokerTx.toUpperCase() === cleanInvokerTx
     );
   }
 
@@ -761,16 +810,28 @@ async function fetchFullMetricsSingleChannel(
     );
 
     const libraries = libraryBuckets
-      .map((lb) => ({
+      .map((bucket) => ({
         invokerLibrary: String(
-          lb.bucket?.invokerLibrary ??
-            lb.bucket?.["invokerLibrary"] ??
-            lb.bucket?.name ??
-            ""
+          bucket.bucket?.invokerLibrary ??
+          bucket.bucket?.["invokerLibrary"] ??
+          bucket.bucket?.name ??
+          ""
         ).trim(),
-        count: Number(lb.values?.count_utility_count ?? 0),
+        count: Number(bucket.values?.count_utility_count ?? 0),
       }))
-      .filter((x) => x.invokerLibrary.length > 0);
+      .filter((item) => item.invokerLibrary.length > 0);
+
+    const selectedInvokerLibraryForTrace =
+      libraries.length > 0
+        ? libraries[Math.floor(Math.random() * libraries.length)].invokerLibrary
+        : undefined;
+
+    console.log("[metricsService selected library for trace]", {
+      invokerTx: txMeta.invokerTx,
+      channelCode: txRow.channelCode,
+      selectedInvokerLibraryForTrace,
+      libraries,
+    });
 
     const utilityTypeBlocks: Array<{
       invokerLibrary: string;
@@ -794,17 +855,17 @@ async function fetchFullMetricsSingleChannel(
       );
 
       let utilityTypes = utilityTypeBuckets
-        .map((ub) => ({
+        .map((bucket) => ({
           invokerLibrary: library.invokerLibrary,
           utilitytype: String(
-            ub.bucket?.utilitytype ??
-              ub.bucket?.["utilitytype"] ??
-              ub.bucket?.name ??
-              ""
+            bucket.bucket?.utilitytype ??
+            bucket.bucket?.["utilitytype"] ??
+            bucket.bucket?.name ??
+            ""
           ).trim(),
-          count: Number(ub.values?.count_utility_count ?? 0),
+          count: Number(bucket.values?.count_utility_count ?? 0),
         }))
-        .filter((x) => x.utilitytype.length > 0);
+        .filter((item) => item.utilitytype.length > 0);
 
       if (baseFilters.utilityType) {
         utilityTypes = utilityTypes.filter(
@@ -823,19 +884,19 @@ async function fetchFullMetricsSingleChannel(
         );
 
         const invokedParams = invokedParamBuckets
-          .map((ip) => ({
+          .map((bucket) => ({
             invokerLibrary: library.invokerLibrary,
             utilitytype: utility.utilitytype,
             invokedparam: String(
-              ip.bucket?.invokedparam ??
-                ip.bucket?.["invokedparam"] ??
-                ip.bucket?.name ??
-                ""
+              bucket.bucket?.invokedparam ??
+              bucket.bucket?.["invokedparam"] ??
+              bucket.bucket?.name ??
+              ""
             ).trim(),
-            count: Number(ip.values?.count_utility_count ?? 0),
-            maxDuration: Number(ip.values?.max_utility_duration ?? 0),
+            count: Number(bucket.values?.count_utility_count ?? 0),
+            maxDuration: Number(bucket.values?.max_utility_duration ?? 0),
           }))
-          .filter((x) => x.invokedparam.length > 0);
+          .filter((item) => item.invokedparam.length > 0);
 
         invokedParamBlocks.push(...invokedParams);
       }
@@ -851,12 +912,14 @@ async function fetchFullMetricsSingleChannel(
       invokerTx: txMeta.invokerTx,
       channelCode: txRow.channelCode,
       responseTimeMs,
+      invokerLibraryHint: selectedInvokerLibraryForTrace,
     });
 
     const trace = await fetchTraceSummaryForInvokerTx(
       baseFilters,
       txMeta.invokerTx,
-      responseTimeMs
+      responseTimeMs,
+      selectedInvokerLibraryForTrace
     );
 
     rows.push({

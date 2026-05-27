@@ -23,6 +23,11 @@ type TraceEntry = {
   channelCode: string;
 };
 
+type SpanWithParent = RawSpan & {
+  parentSpanId?: string;
+  parentId?: string;
+};
+
 function getSelectedChannelCodes(filters: MetricsFilters): string[] {
   const codes = filters.channelCodes?.length
     ? filters.channelCodes
@@ -62,30 +67,67 @@ function normalizeDuration(span: RawSpan): number {
 }
 
 function inferUtilityType(span: RawSpan): string {
-  const ut = span.properties?.utilitytype;
-  if (ut) return String(ut);
+  const utilityType = String(span.properties?.utilitytype ?? "").trim();
 
-  const name = String(span.name ?? "").toLowerCase();
-  const dbQuery = String(span.properties?.databaseQuery ?? "").toLowerCase();
-  const collection = String(span.properties?.collection ?? "").toLowerCase();
-
-  if (name.includes("jdbc") || dbQuery) return "Jdbc";
-
-  if (name.includes("mongo") || name.includes("daas") || collection) {
-    return "DaasMongoConnector";
+  if (utilityType) {
+    return utilityType;
   }
 
-  if (name.includes("cics") || name.includes("interbackend")) {
+  const source = [
+    span.name,
+    span.properties?.invokerLibrary,
+    span.properties?.invokedparam,
+    span.properties?.databaseQuery,
+    span.properties?.databaseInstance,
+    span.properties?.collection,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  if (source.includes("interbackendcics") || source.includes("cics")) {
     return "InterBackendCics";
   }
 
   if (
-    name.includes("apiinternalconnector") ||
-    name.includes("api internal connector") ||
-    name.includes("api-connector") ||
-    name.includes("api connector")
+    source.includes("apiinternalconnectorimpl") ||
+    source.includes("api internal connector") ||
+    source.includes("api-connector") ||
+    source.includes("api connector")
   ) {
     return "APIInternalConnectorImpl";
+  }
+
+  if (
+    source.includes("apiexternalconnectorimpl") ||
+    source.includes("api external connector") ||
+    source.includes("external connector")
+  ) {
+    return "APIExternalConnectorImpl";
+  }
+
+  if (source.includes("jdbc")) {
+    return "Jdbc";
+  }
+
+  if (source.includes("jpa")) {
+    return "Jpa";
+  }
+
+  if (
+    source.includes("daasmongoconnector") ||
+    source.includes("mongo") ||
+    source.includes("collection")
+  ) {
+    return "DaasMongoConnector";
+  }
+
+  if (source.includes("titanclient") || source.includes("titan client")) {
+    return "TitanClient";
+  }
+
+  if (source.includes("grpcclient") || source.includes("grpc")) {
+    return "GRPCClient";
   }
 
   return "UNKNOWN";
@@ -167,14 +209,32 @@ export function classifySpans(spans: NormalizedSpan[]): ClassifiedTraces {
     APIInternalConnectorImpl: [],
     Jdbc: [],
     DaasMongoConnector: [],
+    APIExternalConnectorImpl: [],
+    TitanClient: [],
+    GRPCClient: [],
+    Jpa: [],
     other: [],
   };
 
   for (const span of spans) {
-    const key = span.utilityType as keyof ClassifiedTraces;
+    const utilityType = String(span.utilityType ?? "").trim();
 
-    if (key in result) {
-      result[key].push(span);
+    if (utilityType === "InterBackendCics") {
+      result.InterBackendCics.push(span);
+    } else if (utilityType === "APIInternalConnectorImpl") {
+      result.APIInternalConnectorImpl.push(span);
+    } else if (utilityType === "Jdbc") {
+      result.Jdbc.push(span);
+    } else if (utilityType === "DaasMongoConnector") {
+      result.DaasMongoConnector.push(span);
+    } else if (utilityType === "APIExternalConnectorImpl") {
+      result.APIExternalConnectorImpl.push(span);
+    } else if (utilityType === "TitanClient") {
+      result.TitanClient.push(span);
+    } else if (utilityType === "GRPCClient") {
+      result.GRPCClient.push(span);
+    } else if (utilityType === "Jpa") {
+      result.Jpa.push(span);
     } else {
       result.other.push(span);
     }
@@ -198,26 +258,43 @@ function buildRhoChannelCodeFilter(channelCodes: string[]): string | undefined {
 }
 
 function buildRhoSpanSearchUrl(params: {
-  invokerTx: string;
+  invokerTx?: string;
+  traceId?: string;
   fromDate: string;
   toDate: string;
   site?: string;
   channelCodes?: string[];
   durationMs?: number;
+  invokerLibraryHint?: string;
 }): string {
   const {
     invokerTx,
+    traceId,
     fromDate,
     toDate,
     site,
     channelCodes = [],
     durationMs,
+    invokerLibraryHint,
   } = params;
 
-  const filters: string[] = [
-    `name == "**"`,
-    `properties.invokerTx == "${invokerTx}"`,
-  ];
+  const cleanInvokerLibraryHint = String(invokerLibraryHint ?? "").trim();
+
+  const filters: string[] = [];
+
+  if (cleanInvokerLibraryHint) {
+    filters.push(`name == "*${cleanInvokerLibraryHint}*"`);
+  } else {
+    filters.push(`name == "**"`);
+  }
+
+  if (invokerTx?.trim()) {
+    filters.push(`properties.invokerTx == "${invokerTx.trim()}"`);
+  }
+
+  if (traceId?.trim()) {
+    filters.push(`traceId == "${traceId.trim()}"`);
+  }
 
   if (site?.trim()) {
     filters.push(`properties.site == "${site.trim()}"`);
@@ -229,7 +306,11 @@ function buildRhoSpanSearchUrl(params: {
     filters.push(channelFilter);
   }
 
-  if (typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs > 0) {
+  if (
+    typeof durationMs === "number" &&
+    Number.isFinite(durationMs) &&
+    durationMs > 0
+  ) {
     filters.push(`duration == "${Math.round(durationMs)}"`);
   }
 
@@ -285,24 +366,30 @@ function buildRhoTraceUrl(params: {
   return url.toString();
 }
 
-async function searchBestSpanId(
+async function searchBestSpan(
   filters: MetricsFilters,
   invokerTx: string,
-  responseTimeMs?: number
-): Promise<string | null> {
+  responseTimeMs?: number,
+  invokerLibraryHint?: string
+): Promise<RawSpan | null> {
   const { from, to } = dateRangeToNano(filters.fromDate, filters.toDate);
   const headers = buildAuthHeaders(filters.bearerToken);
   const channelCodes = getSelectedChannelCodes(filters);
 
   const targetDuration =
-  typeof responseTimeMs === "number" && Number.isFinite(responseTimeMs) && responseTimeMs > 0
-    ? Math.round(responseTimeMs)
-    : undefined;
+    typeof responseTimeMs === "number" &&
+    Number.isFinite(responseTimeMs) &&
+    responseTimeMs > 0
+      ? Math.round(responseTimeMs)
+      : undefined;
 
   const pickBestSpan = (items: RawSpan[]): RawSpan | undefined => {
     const validItems = items.filter(
       (span) =>
-        typeof span.spanId === "string" && span.spanId.trim().length > 0
+        typeof span.spanId === "string" &&
+        span.spanId.trim().length > 0 &&
+        typeof span.traceId === "string" &&
+        span.traceId.trim().length > 0
     );
 
     if (!validItems.length) return undefined;
@@ -324,9 +411,10 @@ async function searchBestSpanId(
   };
 
   const search = async (params: {
+    useLibraryHint: boolean;
     useChannelFilter: boolean;
     useDurationFilter: boolean;
-  }): Promise<string | null> => {
+  }): Promise<RawSpan | null> => {
     const url = buildRhoSpanSearchUrl({
       invokerTx,
       fromDate: from,
@@ -337,10 +425,16 @@ async function searchBestSpanId(
         params.useDurationFilter && targetDuration !== undefined
           ? targetDuration
           : undefined,
+      invokerLibraryHint: params.useLibraryHint
+        ? invokerLibraryHint
+        : undefined,
     });
 
     console.log("[RHO span search URL]", {
       invokerTx,
+      invokerLibraryHint: params.useLibraryHint
+        ? invokerLibraryHint
+        : undefined,
       channelCodes: params.useChannelFilter ? channelCodes : [],
       targetDuration,
       useDurationFilter: params.useDurationFilter,
@@ -355,10 +449,12 @@ async function searchBestSpanId(
     const best = pickBestSpan(items);
 
     if (best) {
-      console.log("[RHO selected span]", {
+      console.log("[RHO selected child/hint span]", {
         invokerTx,
+        invokerLibraryHint,
         targetDuration,
         selectedSpanId: best.spanId,
+        selectedTraceId: best.traceId,
         selectedDuration: normalizeDuration(best),
         diff:
           targetDuration !== undefined
@@ -367,51 +463,119 @@ async function searchBestSpanId(
       });
     }
 
-    return best?.spanId ?? null;
+    return best ?? null;
   };
 
-  /**
-   * Orden:
-   * 1. canal + duration exacta
-   * 2. canal sin duration, pero elige la duración más cercana
-   * 3. duration exacta sin canal
-   * 4. sin canal ni duration, pero elige la duración más cercana
-   */
-  if (channelCodes.length && targetDuration !== undefined) {
-    const spanId = await search({
-      useChannelFilter: true,
-      useDurationFilter: true,
-    });
-
-    if (spanId) return spanId;
-  }
-
-  if (channelCodes.length) {
-    const spanId = await search({
-      useChannelFilter: true,
+  const attempts = [
+    {
+      useLibraryHint: Boolean(invokerLibraryHint),
+      useChannelFilter: channelCodes.length > 0,
+      useDurationFilter: targetDuration !== undefined,
+    },
+    {
+      useLibraryHint: Boolean(invokerLibraryHint),
+      useChannelFilter: channelCodes.length > 0,
       useDurationFilter: false,
-    });
-
-    if (spanId) return spanId;
-  }
-
-  if (targetDuration !== undefined) {
-    const spanId = await search({
+    },
+    {
+      useLibraryHint: false,
+      useChannelFilter: channelCodes.length > 0,
+      useDurationFilter: targetDuration !== undefined,
+    },
+    {
+      useLibraryHint: false,
+      useChannelFilter: channelCodes.length > 0,
+      useDurationFilter: false,
+    },
+    {
+      useLibraryHint: false,
       useChannelFilter: false,
-      useDurationFilter: true,
-    });
+      useDurationFilter: targetDuration !== undefined,
+    },
+    {
+      useLibraryHint: false,
+      useChannelFilter: false,
+      useDurationFilter: false,
+    },
+  ];
 
-    if (spanId) return spanId;
+  for (const attempt of attempts) {
+    const span = await search(attempt);
+
+    if (span) return span;
   }
 
-  return search({
-    useChannelFilter: false,
-    useDurationFilter: false,
+  return null;
+}
+
+async function searchRootSpanIdByTraceId(params: {
+  filters: MetricsFilters;
+  traceId: string;
+  invokerTx: string;
+  fallbackSpanId: string;
+}): Promise<string> {
+  const { filters, traceId, invokerTx, fallbackSpanId } = params;
+
+  const { from, to } = dateRangeToNano(filters.fromDate, filters.toDate);
+  const headers = buildAuthHeaders(filters.bearerToken);
+
+  const url = buildRhoSpanSearchUrl({
+    traceId,
+    fromDate: from,
+    toDate: to,
+    site: filters.site,
   });
+
+  console.log("[RHO root span search URL]", {
+    invokerTx,
+    traceId,
+    fallbackSpanId,
+    url,
+  });
+
+  try {
+    const res = await apiRequest<SpansPaginatedResponse>(url, { headers });
+    const items = Array.isArray(res.data) ? (res.data as SpanWithParent[]) : [];
+
+    if (!items.length) {
+      return fallbackSpanId;
+    }
+
+    const root =
+      items.find((span) => {
+        const parentSpanId = String(
+          span.parentSpanId ?? span.parentId ?? ""
+        ).trim();
+
+        return !parentSpanId;
+      }) ?? items.sort((a, b) => normalizeDuration(b) - normalizeDuration(a))[0];
+
+    const rootSpanId = String(root?.spanId ?? "").trim();
+
+    console.log("[RHO selected root span]", {
+      invokerTx,
+      traceId,
+      rootSpanId,
+      rootDuration: root ? normalizeDuration(root) : undefined,
+      fallbackSpanId,
+    });
+
+    return rootSpanId || fallbackSpanId;
+  } catch (error) {
+    console.warn("[RHO] Error buscando root span, usando fallback", {
+      invokerTx,
+      traceId,
+      fallbackSpanId,
+      error,
+    });
+
+    return fallbackSpanId;
+  }
 }
 
 function getSqlMethod(databaseQuery: string): string {
   const q = databaseQuery.trim();
+
   if (!q) return "";
 
   const first = q.split(/\s+/)[0].toUpperCase();
@@ -506,20 +670,31 @@ function filterEntriesByChannel(
     selected.has(String(entry.channelCode ?? "").trim())
   );
 
-  // Si los nodos hijos no traen channel-code, no vaciamos la traza.
-  // El spanId ya se intentó seleccionar por canal en /spans.
   return exactMatches.length ? exactMatches : entries;
 }
 
-function getEntryLabel(item: TraceEntry): string {
-  return (
+function getEntryLibrary(item: TraceEntry): string {
+  return String(item.invokerLibrary || item.name || "-").trim();
+}
+
+function getEntryInvokedParam(item: TraceEntry): string {
+  return String(
     item.invokedparam ||
-    item.invokerLibrary ||
-    item.name ||
-    item.databaseQuery ||
-    item.collection ||
-    "-"
-  );
+      item.databaseQuery ||
+      item.collection ||
+      item.name ||
+      ""
+  ).trim();
+}
+
+function getEntryLabel(item: TraceEntry): string {
+  return getEntryInvokedParam(item) || getEntryLibrary(item) || "-";
+}
+
+function getEntryDatabaseOrCollection(item: TraceEntry): string {
+  return String(
+    item.databaseInstance || item.collection || item.databaseQuery || ""
+  ).trim();
 }
 
 function getAverageDuration(entries: TraceEntry[]): number {
@@ -563,12 +738,12 @@ function buildCicsTreeSection(entries: TraceEntry[], lines: string[]) {
     const secondBranch = isLast ? "        └──" : "    │   └──";
     const thirdBranch = isLast ? "            └──" : "    │       └──";
 
-    const label = getEntryLabel(item);
-    const library = item.invokerLibrary || item.name || "InterBackendCics";
+    const library = getEntryLibrary(item);
+    const label = getEntryInvokedParam(item);
 
-    lines.push(`${branch} ${label} (${formatTraceDuration(item.durationMs)})`);
-    lines.push(`${secondBranch} InterBackendCics[${library}]`);
-    lines.push(`${thirdBranch} ${library}`);
+    lines.push(`${branch} ${library} (${formatTraceDuration(item.durationMs)})`);
+    lines.push(`${secondBranch} InterBackendCics[${label || library}]`);
+    lines.push(`${thirdBranch} ${label}`);
   });
 
   lines.push("");
@@ -579,19 +754,17 @@ function buildJdbcTreeSection(entries: TraceEntry[], lines: string[]) {
 
   lines.push("JDBC");
 
-  const byDatabase = groupBy(entries, (item) => {
-    return item.databaseInstance || item.invokerLibrary || item.name || "JDBC";
+  const byLibrary = groupBy(entries, (item) => {
+    return getEntryLibrary(item);
   });
 
-  Object.entries(byDatabase).forEach(([database, databaseEntries]) => {
-    const avg = getAverageDuration(databaseEntries);
+  Object.entries(byLibrary).forEach(([library, libraryEntries]) => {
+    const avg = getAverageDuration(libraryEntries);
 
-    lines.push(
-      `└── ${database} (Tiempo promedio: ${formatTraceDuration(avg)})`
-    );
+    lines.push(`└── ${library} (Tiempo promedio: ${formatTraceDuration(avg)})`);
 
-    const byMethod = groupBy(databaseEntries, (item) => {
-      return getSqlMethod(item.databaseQuery) || "SQL";
+    const byMethod = groupBy(libraryEntries, (item) => {
+      return getSqlMethod(item.databaseQuery) || "DESCONOCIDO";
     });
 
     Object.entries(byMethod).forEach(([method, methodEntries]) => {
@@ -600,13 +773,63 @@ function buildJdbcTreeSection(entries: TraceEntry[], lines: string[]) {
       methodEntries.forEach((item, index) => {
         const isLast = index === methodEntries.length - 1;
         const branch = isLast ? "    │   └──" : "    │   ├──";
-        const label = getEntryLabel(item);
+
+        const invokedParam = getEntryInvokedParam(item);
+        const database = getEntryDatabaseOrCollection(item);
 
         lines.push(
-          `${branch} Jdbc[${label}] (${formatTraceDuration(item.durationMs)})`
+          `${branch} Jdbc[${invokedParam}] (${formatTraceDuration(
+            item.durationMs
+          )})`
         );
-        lines.push(`    │   │   └── ${label}`);
+
+        if (database) {
+          lines.push(`    │   │   └── ${database}`);
+        } else {
+          lines.push("    │   │   └──");
+        }
+
+        lines.push(`    │   │   └── ${invokedParam}`);
       });
+    });
+
+    lines.push("");
+  });
+}
+
+
+function buildJpaTreeSection(entries: TraceEntry[], lines: string[]) {
+  if (!entries.length) return;
+
+  lines.push("JPA");
+
+  const byLibrary = groupBy(entries, (item) => getEntryLibrary(item));
+
+  Object.entries(byLibrary).forEach(([library, libraryEntries]) => {
+    const avg = getAverageDuration(libraryEntries);
+
+    lines.push(`└── ${library} (Tiempo promedio: ${formatTraceDuration(avg)})`);
+
+    libraryEntries.forEach((item, index) => {
+      const isLast = index === libraryEntries.length - 1;
+      const branch = isLast ? "    └──" : "    ├──";
+
+      const invokedParam = getEntryInvokedParam(item);
+      const database = getEntryDatabaseOrCollection(item);
+
+      lines.push(
+        `${branch} Jpa[${invokedParam}] (${formatTraceDuration(
+          item.durationMs
+        )})`
+      );
+
+      if (database) {
+        lines.push(`        └── ${database}`);
+      } else {
+        lines.push("        └──");
+      }
+
+      lines.push(`        └── ${invokedParam}`);
     });
 
     lines.push("");
@@ -618,52 +841,35 @@ function buildMongoTreeSection(entries: TraceEntry[], lines: string[]) {
 
   lines.push("MONGO CONNECTOR");
 
-  const byCollection = groupBy(entries, (item) => {
-    return (
-      item.collection ||
-      item.databaseInstance ||
-      item.invokerLibrary ||
-      item.name ||
-      "Mongo"
-    );
+  const avg = getAverageDuration(entries);
+
+  lines.push(`└── Tiempo promedio sección: ${formatTraceDuration(avg)}`);
+
+  entries.forEach((item, index) => {
+    const isLast = index === entries.length - 1;
+    const branch = isLast ? "    └──" : "    ├──";
+
+    const library = getEntryLibrary(item);
+    const operation = getMongoOperation(item);
+    const collection = item.collection || item.databaseInstance || "-";
+
+    lines.push(`${branch} ${library} (${formatTraceDuration(item.durationMs)})`);
+    lines.push(`    │   ├── ${collection}`);
+    lines.push(`    │   └── ${operation}`);
   });
 
-  Object.entries(byCollection).forEach(([collection, collectionEntries]) => {
-    const avg = getAverageDuration(collectionEntries);
-
-    lines.push(
-      `└── ${collection} (Tiempo promedio: ${formatTraceDuration(avg)})`
-    );
-
-    const byOperation = groupBy(collectionEntries, (item) => {
-      return getMongoOperation(item);
-    });
-
-    Object.entries(byOperation).forEach(([operation, operationEntries]) => {
-      lines.push(`    ├── ${operation}: ${operationEntries.length} saltos`);
-
-      operationEntries.forEach((item, index) => {
-        const isLast = index === operationEntries.length - 1;
-        const branch = isLast ? "    │   └──" : "    │   ├──";
-        const label = getEntryLabel(item);
-
-        lines.push(
-          `${branch} DaasMongoConnector[${label}] (${formatTraceDuration(
-            item.durationMs
-          )})`
-        );
-        lines.push(`    │   │   └── ${label}`);
-      });
-    });
-
-    lines.push("");
-  });
+  lines.push("");
 }
 
-function buildApiConnectorTreeSection(entries: TraceEntry[], lines: string[]) {
+function buildApiConnectorTreeSection(
+  title: string,
+  utilityType: string,
+  entries: TraceEntry[],
+  lines: string[]
+) {
   if (!entries.length) return;
 
-  lines.push("API-CONNECTOR");
+  lines.push(title);
 
   const avg = getAverageDuration(entries);
 
@@ -675,16 +881,54 @@ function buildApiConnectorTreeSection(entries: TraceEntry[], lines: string[]) {
     const secondBranch = isLast ? "        └──" : "    │   └──";
     const thirdBranch = isLast ? "            └──" : "    │       └──";
 
-    const label = getEntryLabel(item);
-    const library =
-      item.invokerLibrary || item.name || "APIInternalConnectorImpl";
+    const library = getEntryLibrary(item);
+    const invokedParam = getEntryInvokedParam(item);
 
-    lines.push(`${branch} ${label} (${formatTraceDuration(item.durationMs)})`);
-    lines.push(`${secondBranch} APIInternalConnectorImpl[${library}]`);
-    lines.push(`${thirdBranch} ${library}`);
+    lines.push(
+      `${branch} ${invokedParam || library} (${formatTraceDuration(
+        item.durationMs
+      )})`
+    );
+    lines.push(`${secondBranch} ${utilityType}[${library}]`);
+    lines.push(`${thirdBranch} ${invokedParam}`);
   });
 
   lines.push("");
+}
+
+function buildGenericClientTreeSection(
+  title: string,
+  utilityType: string,
+  entries: TraceEntry[],
+  lines: string[]
+) {
+  if (!entries.length) return;
+
+  lines.push(title);
+
+  const byLibrary = groupBy(entries, (item) => getEntryLibrary(item));
+
+  Object.entries(byLibrary).forEach(([library, libraryEntries]) => {
+    const avg = getAverageDuration(libraryEntries);
+
+    lines.push(`└── ${library} (Tiempo promedio: ${formatTraceDuration(avg)})`);
+
+    libraryEntries.forEach((item, index) => {
+      const isLast = index === libraryEntries.length - 1;
+      const branch = isLast ? "    └──" : "    ├──";
+
+      const invokedParam = getEntryInvokedParam(item);
+
+      lines.push(
+        `${branch} ${utilityType}[${invokedParam || library}] (${formatTraceDuration(
+          item.durationMs
+        )})`
+      );
+      lines.push(`        └── ${invokedParam}`);
+    });
+
+    lines.push("");
+  });
 }
 
 function buildOtherTreeSection(entries: TraceEntry[], lines: string[]) {
@@ -702,13 +946,17 @@ function buildOtherTreeSection(entries: TraceEntry[], lines: string[]) {
     const secondBranch = isLast ? "        └──" : "    │   └──";
     const thirdBranch = isLast ? "            └──" : "    │       └──";
 
-    const label = getEntryLabel(item);
+    const library = getEntryLibrary(item);
+    const invokedParam = getEntryInvokedParam(item);
     const type = item.utilitytype || "UNKNOWN";
-    const library = item.invokerLibrary || item.name || type;
 
-    lines.push(`${branch} ${label} (${formatTraceDuration(item.durationMs)})`);
+    lines.push(
+      `${branch} ${invokedParam || library} (${formatTraceDuration(
+        item.durationMs
+      )})`
+    );
     lines.push(`${secondBranch} ${type}[${library}]`);
-    lines.push(`${thirdBranch} ${library}`);
+    lines.push(`${thirdBranch} ${invokedParam}`);
   });
 
   lines.push("");
@@ -724,52 +972,104 @@ function buildTraceSummary(entries: TraceEntry[], responseTimeMs = 0): string {
     0
   );
 
-  const tr = Number.isFinite(responseTimeMs) ? Number(responseTimeMs) : 0;
+  const tr =
+    Number.isFinite(responseTimeMs) && responseTimeMs > 0
+      ? Number(responseTimeMs)
+      : 0;
 
-  const tiempoTotalAws = Math.round(
-    (tr + AWS_NETWORK_CONSTANT_MS) * totalSaltos
-  );
+  const totalTiempoEsperadoAws =
+    (tr + AWS_NETWORK_CONSTANT_MS) * totalSaltos;
 
   const lines: string[] = [];
 
-  lines.push("=== RESUMEN DE SALTOS Y TIEMPOS DE RESPUESTA ===");
+  lines.push("RESUMEN DE SALTOS Y TIEMPOS DE RESPUESTA");
   lines.push(`Total de saltos encontrados: ${totalSaltos}`);
   lines.push(`Tiempo total de saltos: ${formatTraceDuration(tiempoTotalSaltos)}`);
-  lines.push(`Tiempo total de  comunicación con AWS: ${tiempoTotalAws} ms`);
+  lines.push(
+    `Total de Tiempo Esperado en AWS: ${formatTraceDuration(
+      totalTiempoEsperadoAws
+    )}`
+  );
   lines.push("");
   lines.push("============================================================");
   lines.push("");
   lines.push("=== DETALLE DE TRAZAS ===");
   lines.push("");
 
-  buildCicsTreeSection(
-    entries.filter((e) => e.utilitytype === "InterBackendCics"),
-    lines
+  const cicsEntries = entries.filter(
+    (entry) => entry.utilitytype === "InterBackendCics"
   );
 
-  buildJdbcTreeSection(
-    entries.filter((e) => e.utilitytype === "Jdbc"),
-    lines
+  const jdbcEntries = entries.filter((entry) => entry.utilitytype === "Jdbc");
+
+  const jpaEntries = entries.filter((entry) => entry.utilitytype === "Jpa");
+
+  const mongoEntries = entries.filter(
+    (entry) => entry.utilitytype === "DaasMongoConnector"
   );
 
-  buildMongoTreeSection(
-    entries.filter((e) => e.utilitytype === "DaasMongoConnector"),
+  const apiInternalEntries = entries.filter(
+    (entry) => entry.utilitytype === "APIInternalConnectorImpl"
+  );
+
+  const apiExternalEntries = entries.filter(
+    (entry) => entry.utilitytype === "APIExternalConnectorImpl"
+  );
+
+  const titanEntries = entries.filter(
+    (entry) => entry.utilitytype === "TitanClient"
+  );
+
+  const grpcEntries = entries.filter(
+    (entry) => entry.utilitytype === "GRPCClient"
+  );
+
+  const knownTypes = new Set([
+    "InterBackendCics",
+    "APIInternalConnectorImpl",
+    "APIExternalConnectorImpl",
+    "Jdbc",
+    "Jpa",
+    "DaasMongoConnector",
+    "TitanClient",
+    "GRPCClient",
+  ]);
+
+  const otherEntries = entries.filter(
+    (entry) => !knownTypes.has(entry.utilitytype)
+  );
+
+  buildCicsTreeSection(cicsEntries, lines);
+  buildJdbcTreeSection(jdbcEntries, lines);
+  buildJpaTreeSection(jpaEntries, lines);
+  buildMongoTreeSection(mongoEntries, lines);
+
+  buildApiConnectorTreeSection(
+    "API-CONNECTOR INTERNO",
+    "APIInternalConnectorImpl",
+    apiInternalEntries,
     lines
   );
 
   buildApiConnectorTreeSection(
-    entries.filter((e) => e.utilitytype === "APIInternalConnectorImpl"),
+    "API-CONNECTOR EXTERNO",
+    "APIExternalConnectorImpl",
+    apiExternalEntries,
     lines
   );
 
-  const otherEntries = entries.filter(
-    (e) =>
-      ![
-        "InterBackendCics",
-        "Jdbc",
-        "DaasMongoConnector",
-        "APIInternalConnectorImpl",
-      ].includes(e.utilitytype)
+  buildGenericClientTreeSection(
+    "TITAN CLIENT",
+    "TitanClient",
+    titanEntries,
+    lines
+  );
+
+  buildGenericClientTreeSection(
+    "GRPC CLIENT",
+    "GRPCClient",
+    grpcEntries,
+    lines
   );
 
   buildOtherTreeSection(otherEntries, lines);
@@ -780,36 +1080,55 @@ function buildTraceSummary(entries: TraceEntry[], responseTimeMs = 0): string {
 export async function fetchSpans(
   filters: MetricsFilters,
   invokerTx: string,
-  responseTimeMs?: number
+  responseTimeMs?: number,
+  invokerLibraryHint?: string
 ): Promise<NormalizedSpan[]> {
   const { from, to } = dateRangeToNano(filters.fromDate, filters.toDate);
-  const headers = buildAuthHeaders(filters.bearerToken);
 
-  const bestSpanId = await searchBestSpanId(
+  const hintSpan = await searchBestSpan(
     filters,
     invokerTx,
-    responseTimeMs
+    responseTimeMs,
+    invokerLibraryHint
   );
 
-  if (!bestSpanId) {
-    console.warn(`[RHO] No se encontró spanId para invokerTx=${invokerTx}`);
+  if (!hintSpan?.spanId) {
+    console.warn(`[RHO] No se encontró span para invokerTx=${invokerTx}`);
     return [];
   }
 
+  const traceId = String(hintSpan.traceId ?? "").trim();
+  const hintSpanId = String(hintSpan.spanId ?? "").trim();
+
+  const rootSpanId = traceId
+    ? await searchRootSpanIdByTraceId({
+        filters,
+        traceId,
+        invokerTx,
+        fallbackSpanId: hintSpanId,
+      })
+    : hintSpanId;
+
   const url = buildRhoTraceUrl({
-    spanId: bestSpanId,
+    spanId: rootSpanId,
     fromDate: from,
     toDate: to,
   });
 
-  console.log("[RHO trace URL]", {
+  console.log("[RHO full trace URL]", {
     invokerTx,
     responseTimeMs,
-    spanId: bestSpanId,
+    invokerLibraryHint,
+    hintSpanId,
+    traceId,
+    rootSpanId,
     url,
   });
 
-  const trace = await apiRequest<RawSpan>(url, { headers });
+  const trace = await apiRequest<RawSpan>(url, {
+    headers: buildAuthHeaders(filters.bearerToken),
+  });
+
   const normalized = normalizeSpans(trace);
 
   const channelCodes = getSelectedChannelCodes(filters);
@@ -833,38 +1152,55 @@ export async function fetchSpans(
 export async function fetchTraceSummaryForInvokerTx(
   filters: MetricsFilters,
   invokerTx: string,
-  responseTimeMs?: number
+  responseTimeMs?: number,
+  invokerLibraryHint?: string
 ): Promise<string> {
   const { from, to } = dateRangeToNano(filters.fromDate, filters.toDate);
-  const headers = buildAuthHeaders(filters.bearerToken);
 
-  const bestSpanId = await searchBestSpanId(
+  const hintSpan = await searchBestSpan(
     filters,
     invokerTx,
-    responseTimeMs
+    responseTimeMs,
+    invokerLibraryHint
   );
 
-  if (!bestSpanId) {
-    console.warn(
-      `[RHO] No se encontró spanId para resumen invokerTx=${invokerTx}`
-    );
+  if (!hintSpan?.spanId) {
+    console.warn(`[RHO] No se encontró span para resumen invokerTx=${invokerTx}`);
     return "Sin trazas encontradas";
   }
 
+  const traceId = String(hintSpan.traceId ?? "").trim();
+  const hintSpanId = String(hintSpan.spanId ?? "").trim();
+
+  const rootSpanId = traceId
+    ? await searchRootSpanIdByTraceId({
+        filters,
+        traceId,
+        invokerTx,
+        fallbackSpanId: hintSpanId,
+      })
+    : hintSpanId;
+
   const url = buildRhoTraceUrl({
-    spanId: bestSpanId,
+    spanId: rootSpanId,
     fromDate: from,
     toDate: to,
   });
 
-  console.log("[RHO trace summary URL]", {
+  console.log("[RHO full trace summary URL]", {
     invokerTx,
+    invokerLibraryHint,
     responseTimeMs,
-    spanId: bestSpanId,
+    hintSpanId,
+    traceId,
+    rootSpanId,
     url,
   });
 
-  const trace = await apiRequest<RawSpan>(url, { headers });
+  const trace = await apiRequest<RawSpan>(url, {
+    headers: buildAuthHeaders(filters.bearerToken),
+  });
+
   const entries: TraceEntry[] = [];
 
   collectTraceEntries(trace, entries);
