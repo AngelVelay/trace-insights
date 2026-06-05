@@ -21,7 +21,15 @@ import {
   buildAuthHeaders,
   createConcurrencyLimiter,
 } from "./httpClient";
-import { fetchTraceSummaryForInvokerTx } from "./tracesService";
+
+import {
+  fetchTraceSummaryForInvokerTx,
+  fetchMetadataForInvokerTx,
+  fetchTraceChannelsForInvokerTx,
+} from "./tracesService";
+
+
+
 
 const limiter = createConcurrencyLimiter(5);
 const awsInformLimiter = createConcurrencyLimiter(2);
@@ -144,6 +152,8 @@ async function fetchAggregation(
 
   return extractBuckets(res);
 }
+
+
 
 function getSelectedChannelCodes(filters: MetricsFilters): string[] {
   const codes = filters.channelCodes?.length
@@ -641,13 +651,13 @@ export async function fetchAwsInformComparison(params: {
   const avgDurationLive02 =
     rows.length > 0
       ? rows.reduce((sum, row) => sum + row.live02.meanDurationMs, 0) /
-        rows.length
+      rows.length
       : 0;
 
   const avgDurationLive04 =
     rows.length > 0
       ? rows.reduce((sum, row) => sum + row.live04.meanDurationMs, 0) /
-        rows.length
+      rows.length
       : 0;
 
   onProgress?.("Informe AWS generado");
@@ -751,10 +761,16 @@ async function fetchFullMetricsSingleChannel(
 
   const invokerTxBuckets = await fetchInvokerTxBuckets(baseFilters);
 
+  const currentChannelCode =
+    getSelectedChannelCodes(baseFilters)[0] ||
+    String(baseFilters.channelCode ?? "").trim() ||
+    channelLabel ||
+    "-";
+
   const txMetaRows = invokerTxBuckets
     .map((bucket) => ({
       site: baseFilters.site ?? "",
-      channelCode: channelLabel,
+      channelCode: currentChannelCode,
       meta: {
         invokerTx: String(bucket.bucket?.name ?? "").trim(),
         sum_num_executions: Number(bucket.values?.sum_num_executions ?? 0),
@@ -813,9 +829,9 @@ async function fetchFullMetricsSingleChannel(
       .map((bucket) => ({
         invokerLibrary: String(
           bucket.bucket?.invokerLibrary ??
-            bucket.bucket?.["invokerLibrary"] ??
-            bucket.bucket?.name ??
-            ""
+          bucket.bucket?.["invokerLibrary"] ??
+          bucket.bucket?.name ??
+          ""
         ).trim(),
         count: Number(bucket.values?.count_utility_count ?? 0),
       }))
@@ -847,9 +863,9 @@ async function fetchFullMetricsSingleChannel(
           invokerLibrary: library.invokerLibrary,
           utilitytype: String(
             bucket.bucket?.utilitytype ??
-              bucket.bucket?.["utilitytype"] ??
-              bucket.bucket?.name ??
-              ""
+            bucket.bucket?.["utilitytype"] ??
+            bucket.bucket?.name ??
+            ""
           ).trim(),
           count: Number(bucket.values?.count_utility_count ?? 0),
         }))
@@ -877,9 +893,9 @@ async function fetchFullMetricsSingleChannel(
             utilitytype: utility.utilitytype,
             invokedparam: String(
               bucket.bucket?.invokedparam ??
-                bucket.bucket?.["invokedparam"] ??
-                bucket.bucket?.name ??
-                ""
+              bucket.bucket?.["invokedparam"] ??
+              bucket.bucket?.name ??
+              ""
             ).trim(),
             count: Number(bucket.values?.count_utility_count ?? 0),
             maxDuration: Number(bucket.values?.max_utility_duration ?? 0),
@@ -919,10 +935,81 @@ async function fetchFullMetricsSingleChannel(
       invokerLibraryHintsForTrace
     );
 
+    const rhoMetadata = await fetchMetadataForInvokerTx(
+      baseFilters,
+      txMeta.invokerTx,
+      responseTimeMs,
+      selectedInvokerLibraryForTrace,
+      invokerLibraryHintsForTrace
+    );
+
+    const rhoChannels = await fetchTraceChannelsForInvokerTx(
+      baseFilters,
+      txMeta.invokerTx,
+      responseTimeMs,
+      selectedInvokerLibraryForTrace,
+      invokerLibraryHintsForTrace
+    );
+
+    const searchedChannelCode =
+      String(txRow.channelCode ?? "").trim() ||
+      getSelectedChannelCodes(baseFilters)[0] ||
+      String(baseFilters.channelCode ?? "").trim() ||
+      "-";
+
+    const traceChannelCode = String(rhoMetadata.channelCode ?? "").trim() || "-";
+    const traceAap = String(rhoMetadata.aap ?? "").trim() || "-";
+    const traceTypology = String(rhoMetadata.typology ?? "").trim() || "-";
+
+    const channelMetadataForSearch = rhoChannels.find((item) => {
+      return String(item.channelCode ?? "").trim() === searchedChannelCode;
+    });
+
+    /**
+     * El canal principal de la fila SIEMPRE es el canal seleccionado/buscado.
+     * Si RHO encuentra otros canales en la traza, se guardan aparte en traceChannels.
+     */
+    const finalChannelCode = searchedChannelCode;
+
+    const aap =
+      String(channelMetadataForSearch?.aap ?? "").trim() ||
+      "-";
+
+    const typology =
+      String(channelMetadataForSearch?.typology ?? "").trim() ||
+      traceTypology ||
+      "-";
+
+    const site =
+      String(channelMetadataForSearch?.site ?? "").trim() ||
+      String(rhoMetadata.site ?? "").trim() ||
+      txRow.site ||
+      baseFilters.site ||
+      "-";
+
     rows.push({
-      site: txRow.site,
-      channelCode: txRow.channelCode,
-      invokerTx: JSON.stringify(txMeta),
+      site,
+      channelCode: finalChannelCode,
+      aap,
+      typology,
+
+      traceChannelCode,
+      traceAap,
+      traceTypology,
+      traceChannels: rhoChannels,
+
+      invokerTx: JSON.stringify({
+        ...txMeta,
+        channelCode: finalChannelCode,
+        aap,
+        typology,
+
+        traceChannelCode,
+        traceAap,
+        traceTypology,
+        traceChannels: rhoChannels,
+      }),
+
       invokerLibrary: libraries.length ? JSON.stringify(libraries) : "-",
       utilitytype: utilityTypeBlocks.length
         ? JSON.stringify(utilityTypeBlocks)

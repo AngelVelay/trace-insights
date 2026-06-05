@@ -448,7 +448,7 @@ function assessAwsRisk(row: MetricRow, trace: string): RiskAssessment {
   }
 
   const lowReasons = [
-    "Solo utilities compatibles: SELECT, TITAN, API INTERNAL",
+    "Solo utilities compatibles:",
     `Saltos <= 5: ${totalJumps}`,
     "Sin modificadores BD",
     "Sin CICS/Mongo",

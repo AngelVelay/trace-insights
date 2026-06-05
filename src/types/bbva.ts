@@ -1,134 +1,163 @@
 export type NanoTimestamp = string;
 
 export type SearchMode =
-  | "pipeline"
-  | "utility"
-  | "rho"
-  | "versioning-env"
-  | "versioning-incidents";
+    | "pipeline"
+    | "utility"
+    | "rho"
+    | "versioning-env"
+    | "versioning-incidents";
 
-  
+
 
 export type AggregateField =
-  | "name"
-  | "invokerTx"
-  | "utilitytype"
-  | "invokerLibrary"
-  | "invokedparam"
-  | "channel-code"
-  | "typology"
-  | "invokedHostTx"
-  | "databaseInstance"
-  | "site"
-  | "env";
+    | "name"
+    | "invokerTx"
+    | "utilitytype"
+    | "invokerLibrary"
+    | "invokedparam"
+    | "channel-code"
+    | "typology"
+    | "invokedHostTx"
+    | "databaseInstance"
+    | "site"
+    | "env";
 
 export type OperationType =
-  | "sum:num_executions"
-  | "mean:span_duration"
-  | "sum:technical_error"
-  | "sum:functional_error"
-  | "count:utility_count"
-  | "min:utility_duration"
-  | "mean:utility_duration"
-  | "max:utility_duration";
+    | "sum:num_executions"
+    | "mean:span_duration"
+    | "sum:technical_error"
+    | "sum:functional_error"
+    | "count:utility_count"
+    | "min:utility_duration"
+    | "mean:utility_duration"
+    | "max:utility_duration";
 
 export type MetricSetName =
-  | "functional-dashboard"
-  | "utility-metric-set"
-  | "technical-dashboard";
+    | "functional-dashboard"
+    | "utility-metric-set"
+    | "technical-dashboard";
 
 export type MetricMethod = "listAggregations" | "listTimeseries";
 
 export interface AggregationBucket {
-  bucket: Record<string, string>;
-  values: Record<string, number>;
+    bucket: Record<string, string>;
+    values: Record<string, number>;
 }
 
 export interface AggregationResponse {
-  buckets?: AggregationBucket[];
-  data?: AggregationBucket[];
-  aggregations?: AggregationBucket[];
+    buckets?: AggregationBucket[];
+    data?: AggregationBucket[];
+    aggregations?: AggregationBucket[];
 }
 
 
 
 export interface TimeseriesPoint {
-  timestamp: string;
-  values: Record<string, number>;
+    timestamp: string;
+    values: Record<string, number>;
 }
 
 export interface TimeseriesResponse {
-  data?: TimeseriesPoint[];
-  timeseries?: TimeseriesPoint[];
+    data?: TimeseriesPoint[];
+    timeseries?: TimeseriesPoint[];
 }
 
 export interface RawSpan {
-  spanId?: string;
-  traceId?: string;
-  name?: string;
-  duration?: number | null;
-  startTime?: string | number;
-  endTime?: string | number;
-  startDate?: number;
-  finishDate?: number;
-  recordDate?: number;
-  parentSpan?: string;
-  properties?: Record<string, string>;
-  children?: RawSpan[];
+    spanId?: string;
+    traceId?: string;
+    name?: string;
+    duration?: number | null;
+    startTime?: string | number;
+    endTime?: string | number;
+    startDate?: number;
+    finishDate?: number;
+    recordDate?: number;
+    parentSpan?: string;
+    properties?: Record<string, string>;
+    children?: RawSpan[];
 }
 
 export interface SpansPaginatedResponse {
-  data?: RawSpan[];
-  pagination?: {
-    totalElements?: number;
-    links?: {
-      first?: string;
-      next?: string;
+    data?: RawSpan[];
+    pagination?: {
+        totalElements?: number;
+        links?: {
+            first?: string;
+            next?: string;
+        };
     };
-  };
 }
 
 export interface NormalizedSpan {
-  id: string;
-  traceId: string;
-  spanId: string;
-  parentSpanId?: string;
-  name: string;
-  service: string;
-  durationMs: number;
-  utilityType: string;
-  channelCode?: string;
-  properties: Record<string, string>;
+    id: string;
+    traceId: string;
+    spanId: string;
+    parentSpanId?: string;
+    name: string;
+    service: string;
+    durationMs: number;
+    utilityType: string;
+    channelCode?: string;
+    properties: Record<string, string>;
 }
 
 
 export const UTILITY_TYPES = [
-  "InterBackendCics",
-  "APIInternalConnectorImpl",
-  "Jdbc",
-  "DaasMongoConnector",
-  "APIExternalConnectorImpl",
-  "TitanClient",
-  "GRPCClient",
-  "Jpa",
+    "InterBackendCics",
+    "APIInternalConnectorImpl",
+    "Jdbc",
+    "DaasMongoConnector",
+    "APIExternalConnectorImpl",
+    "TitanClient",
+    "GRPCClient",
+    "Jpa",
 ] as const;
 
 
 export interface ChannelApplication {
-  channel: string;
-  name: string;
-  aap: number;
+    channel: string;
+    name: string;
+    aap: number;
 }
 
 export type GroupedChannelCodes = Record<string, ChannelApplication[]>;
 
 export interface ChannelCodeOption {
-  channelCode: string;
-  name: string;
-  aap: number;
-  aaps: number[];
-  applications: ChannelApplication[];
+    channelCode: string;
+    name: string;
+    aap: number;
+    aaps: number[];
+    applications: ChannelApplication[];
 }
+
+export interface MetricRow {
+  site: string;
+  channelCode?: string;
+  aap?: string;
+  typology?: string;
+
+  traceChannelCode?: string;
+  traceAap?: string;
+  traceTypology?: string;
+  traceChannels?: Array<{
+    channelCode?: string;
+    aap?: string;
+    typology?: string;
+    site?: string;
+  }>;
+
+  invokerTx: string;
+  invokerLibrary: string;
+  utilitytype: string;
+  invokedparam: string;
+  trace: string;
+
+  utility_count: number;
+  min_utility_duration: number;
+  mean_utility_duration: number;
+  max_utility_duration: number;
+}
+
 
 export const GROUPED_CHANNEL_CODES: GroupedChannelCodes = {
     "01": [
@@ -1476,123 +1505,125 @@ export const GROUPED_CHANNEL_CODES: GroupedChannelCodes = {
 export type UtilityType = (typeof UTILITY_TYPES)[number];
 
 export interface MetricRow {
-  site: string;
-  channelCode?: string;
-  invokerTx: string;
-  invokerLibrary: string;
-  utilitytype: string;
-  invokedparam: string;
-  trace: string;
-  utility_count: number;
-  min_utility_duration: number;
-  mean_utility_duration: number;
-  max_utility_duration: number;
+    site: string;
+    channelCode?: string;
+    invokerTx: string;
+    invokerLibrary: string;
+    utilitytype: string;
+    invokedparam: string;
+    trace: string;
+    utility_count: number;
+    min_utility_duration: number;
+    mean_utility_duration: number;
+    max_utility_duration: number;
+    aap?: string;
+    typology?: string;
 }
 
 export interface KPISummary {
-  totalInvokerTx: number;
-  totalUtilityTypes: number;
-  totalInvokedParams: number;
-  totalExecutions: number;
-  totalJumps: number;
-  totalDurationMs: number;
-  avgDurationMs: number;
+    totalInvokerTx: number;
+    totalUtilityTypes: number;
+    totalInvokedParams: number;
+    totalExecutions: number;
+    totalJumps: number;
+    totalDurationMs: number;
+    avgDurationMs: number;
 
-  traceApiConnectors: number;
-  traceCics: number;
-  traceJdbc: number;
-  traceMongo: number;
+    traceApiConnectors: number;
+    traceCics: number;
+    traceJdbc: number;
+    traceMongo: number;
 
-  traceApiExternalConnectors: number;
-  traceTitanClient: number;
-  traceGrpcClient: number;
-  traceJpa: number;
+    traceApiExternalConnectors: number;
+    traceTitanClient: number;
+    traceGrpcClient: number;
+    traceJpa: number;
 }
 
 export interface ClassifiedTraces {
-  InterBackendCics: NormalizedSpan[];
-  APIInternalConnectorImpl: NormalizedSpan[];
-  Jdbc: NormalizedSpan[];
-  DaasMongoConnector: NormalizedSpan[];
-  APIExternalConnectorImpl: NormalizedSpan[];
-  TitanClient: NormalizedSpan[];
-  GRPCClient: NormalizedSpan[];
-  Jpa: NormalizedSpan[];
-  other: NormalizedSpan[];
+    InterBackendCics: NormalizedSpan[];
+    APIInternalConnectorImpl: NormalizedSpan[];
+    Jdbc: NormalizedSpan[];
+    DaasMongoConnector: NormalizedSpan[];
+    APIExternalConnectorImpl: NormalizedSpan[];
+    TitanClient: NormalizedSpan[];
+    GRPCClient: NormalizedSpan[];
+    Jpa: NormalizedSpan[];
+    other: NormalizedSpan[];
 }
 export interface ApiConfig {
-  baseUrl: string;
-  timeout: number;
-  maxRetries: number;
+    baseUrl: string;
+    timeout: number;
+    maxRetries: number;
 }
 
 export interface MetricsFilters {
-  fromDate: Date;
-  toDate: Date;
-  site?: string;
+    fromDate: Date;
+    toDate: Date;
+    site?: string;
 
-  invokerTx?: string;
-  invokerTxList?: string[];
+    invokerTx?: string;
+    invokerTxList?: string[];
 
-  utilityType?: string;
-  invokerLibrary?: string;
+    utilityType?: string;
+    invokerLibrary?: string;
 
-  channelCode?: string;
-  channelCodes?: string[];
+    channelCode?: string;
+    channelCodes?: string[];
 
-  limit?: number;
-  bearerToken?: string;
-  searchMode?: SearchMode;
-  iterateAllInvokerTx?: boolean;
+    limit?: number;
+    bearerToken?: string;
+    searchMode?: SearchMode;
+    iterateAllInvokerTx?: boolean;
 }
 
 function normalizeChannelCodeKey(channel: string): string[] {
-  return String(channel)
-    .split(/[/\n]+/g)
-    .map((item) => item.trim())
-    .filter(Boolean);
+    return String(channel)
+        .split(/[/\n]+/g)
+        .map((item) => item.trim())
+        .filter(Boolean);
 }
 
 
 export const CHANNEL_CODES: ChannelCodeOption[] = Object.entries(
-  GROUPED_CHANNEL_CODES
+    GROUPED_CHANNEL_CODES
 )
-  .flatMap(([groupKey, applications]) => {
-    const codes = normalizeChannelCodeKey(groupKey);
+    .flatMap(([groupKey, applications]) => {
+        const codes = normalizeChannelCodeKey(groupKey);
 
-    return codes.map((code) => {
-      const normalizedApplications = applications.map((app) => ({
-        ...app,
-        channel: code,
-      }));
+        return codes.map((code) => {
+            const normalizedApplications = applications.map((app) => ({
+                ...app,
+                channel: code,
+            }));
 
-      return {
-        channelCode: code,
-        name:
-          normalizedApplications.length === 1
-            ? normalizedApplications[0].name
-            : `${normalizedApplications.length} aplicaciones`,
-        aap: normalizedApplications[0]?.aap ?? 0,
-        aaps: normalizedApplications.map((app) => app.aap),
-        applications: normalizedApplications,
-      };
-    });
-  })
-  .reduce<ChannelCodeOption[]>((acc, item) => {
-    const existing = acc.find(
-      (current) => current.channelCode === item.channelCode
-    );
+            return {
+                channelCode: code,
+                name:
+                    normalizedApplications.length === 1
+                        ? normalizedApplications[0].name
+                        : `${normalizedApplications.length} aplicaciones`,
+                aap: normalizedApplications[0]?.aap ?? 0,
+                aaps: normalizedApplications.map((app) => app.aap),
+                applications: normalizedApplications,
+            };
+        });
+    })
+    .reduce<ChannelCodeOption[]>((acc, item) => {
+        const existing = acc.find(
+            (current) => current.channelCode === item.channelCode
+        );
 
-    if (!existing) {
-      acc.push(item);
-      return acc;
-    }
+        if (!existing) {
+            acc.push(item);
+            return acc;
+        }
 
-    existing.applications.push(...item.applications);
-    existing.aaps.push(...item.aaps);
-    existing.name = `${existing.applications.length} aplicaciones`;
-    existing.aap = existing.applications[0]?.aap ?? existing.aap;
+        existing.applications.push(...item.applications);
+        existing.aaps.push(...item.aaps);
+        existing.name = `${existing.applications.length} aplicaciones`;
+        existing.aap = existing.applications[0]?.aap ?? existing.aap;
 
-    return acc;
-  }, [])
-  .sort((a, b) => a.channelCode.localeCompare(b.channelCode));
+        return acc;
+    }, [])
+    .sort((a, b) => a.channelCode.localeCompare(b.channelCode));

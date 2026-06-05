@@ -1,5 +1,4 @@
-import type { MetricRow } from "@/types/bbva";
-import type {
+import { GROUPED_CHANNEL_CODES, type MetricRow } from "@/types/bbva";import type {
   AwsInformComparisonResult,
   AwsInformComparisonRow,
 } from "@/services/metricsService";
@@ -7,6 +6,9 @@ import { buildAwsAnalysisReport } from "@/services/awsReportBuilder";
 
 type InvokerTxMeta = {
   invokerTx?: string;
+  channelCode?: string;
+  aap?: string;
+  typology?: string;
   sum_num_executions?: number;
   mean_span_duration?: number;
   sum_functional_error?: number;
@@ -31,6 +33,96 @@ type InvokedParamItem = {
   count?: number;
   maxDuration?: number;
 };
+
+type GroupedChannelApplication = {
+  channel: string;
+  name: string;
+  aap: number | string;
+};
+
+function findChannelByAap(
+  aapValue?: string | number | null
+): GroupedChannelApplication | null {
+  const cleanAap = String(aapValue ?? "").trim();
+
+  if (!cleanAap || cleanAap === "-") {
+    return null;
+  }
+
+  for (const applications of Object.values(GROUPED_CHANNEL_CODES)) {
+    const match = (applications as GroupedChannelApplication[]).find((item) => {
+      return String(item.aap ?? "").trim() === cleanAap;
+    });
+
+    if (match) {
+      return match;
+    }
+  }
+
+  return null;
+}
+
+function findChannelByCode(
+  channelCode?: string | null
+): GroupedChannelApplication | null {
+  const cleanChannel = String(channelCode ?? "").trim();
+
+  if (!cleanChannel || cleanChannel === "-") {
+    return null;
+  }
+
+  const applications = GROUPED_CHANNEL_CODES[
+    cleanChannel as keyof typeof GROUPED_CHANNEL_CODES
+  ] as GroupedChannelApplication[] | undefined;
+
+  return applications?.[0] ?? null;
+}
+
+function renderChannelCell(row: MetricRow): string {
+   const meta = parseInvokerTx(row.invokerTx);
+
+  const aap =
+    String(row.aap ?? "").trim() ||
+    String(meta.aap ?? "").trim();
+
+  const channelCode =
+    String(row.channelCode ?? "").trim() ||
+    String(meta.channelCode ?? "").trim();
+
+  const mappedChannel = findChannelByAap(aap);
+
+  if (mappedChannel) {
+    return [
+      `• Canal: ${mappedChannel.channel}`,
+      `• Nombre: ${mappedChannel.name}`,
+      `• AAP: ${mappedChannel.aap}`,
+    ].join("\n");
+  }
+
+  if (channelCode && aap) {
+    return [`• Canal: ${channelCode}`, `• AAP: ${aap}`].join("\n");
+  }
+
+  if (channelCode) {
+    return `• Canal: ${channelCode}`;
+  }
+
+  if (aap) {
+    return `• AAP: ${aap}`;
+  }
+
+  return "-";
+}
+
+function renderTypologyCell(row: MetricRow): string {
+  const meta = parseInvokerTx(row.invokerTx);
+
+  return (
+    String(row.typology ?? "").trim() ||
+    String(meta.typology ?? "").trim() ||
+    "-"
+  );
+}
 
 function normalizeUtilityLabel(utilityType: string): string {
   const clean = utilityType.trim();
@@ -237,6 +329,7 @@ function renderInformeAwsCell(row: MetricRow): string {
 const AWS_MONITORING_TABLE_HEADERS = [
   "Site",
   "Canal",
+  "Zona de Ejecución",
   "InvokerTx",
   "InvokerTx simple",
   "Library",
@@ -252,7 +345,8 @@ function getMonitoringTableRows(rows: MetricRow[]) {
   return rows.map((row) => {
     return [
       row.site || "-",
-      row.channelCode || "-",
+      renderChannelCell(row),
+      renderTypologyCell(row),
       renderInvokerTxCell(row),
       renderSimpleInvokerTxCell(row),
       renderLibraryCell(row),

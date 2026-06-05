@@ -15,28 +15,21 @@ import {
 const RHO_BASE = "https://rho.live-02.nextgen.igrupobbva";
 const AWS_NETWORK_CONSTANT_MS = 89;
 
-/**
- * Ajustes de performance.
- *
- * MAX_TRACE_IDS_PER_INVOKER:
- * Limita cuántas trazas completas se traen por cada invokerTx.
- * Si lo subes mucho, la consulta se vuelve lenta.
- */
 const MAX_TRACE_IDS_PER_INVOKER = 3;
-
-/**
- * Si está en true:
- * span encontrado -> traceId -> rootSpanId -> trace completa.
- *
- * Si está en false:
- * usa directamente el spanId encontrado. Más rápido, pero puede traer trazas parciales.
- */
 const USE_ROOT_SPAN_LOOKUP = true;
 
 const traceLimiter = createConcurrencyLimiter(3);
 
 const traceCache = new Map<string, RawSpan>();
 const rootSpanCache = new Map<string, string>();
+
+export type TraceSpanMetadata = {
+  channelCode?: string;
+  aap?: string;
+  typology?: string;
+  site?: string;
+  channels?: TraceChannelMetadata[];
+};
 
 type TraceEntry = {
   utilitytype: string;
@@ -53,7 +46,19 @@ type TraceEntry = {
 type SpanWithParent = RawSpan & {
   parentSpanId?: string;
   parentId?: string;
+  parentSpan?: string;
 };
+
+export type TraceChannelMetadata = {
+  channelCode?: string;
+  aap?: string;
+  typology?: string;
+  site?: string;
+};
+
+
+
+type RhoSpanDetailResponse = RawSpan | Record<string, unknown>;
 
 function getSelectedChannelCodes(filters: MetricsFilters): string[] {
   const codes = filters.channelCodes?.length
@@ -69,6 +74,56 @@ function getSelectedChannelCodes(filters: MetricsFilters): string[] {
         .filter((code) => code && code !== "all")
     )
   );
+}
+
+function extractMetadataFromSpan(
+  span: RawSpan | null | undefined
+): TraceChannelMetadata | null {
+  const props = span?.properties ?? {};
+
+  const channelCode =
+    String(props["channel-code"] ?? "").trim() ||
+    String(props.channelCode ?? "").trim();
+
+  const aap = String(props.aap ?? "").trim();
+  const typology = String(props.typology ?? "").trim();
+  const site = String(props.site ?? "").trim();
+
+  if (!channelCode && !aap && !typology && !site) {
+    return null;
+  }
+
+  return {
+    channelCode: channelCode || undefined,
+    aap: aap || undefined,
+    typology: typology || undefined,
+    site: site || undefined,
+  };
+}
+
+function dedupeTraceChannels(
+  channels: TraceChannelMetadata[]
+): TraceChannelMetadata[] {
+  const seen = new Set<string>();
+  const result: TraceChannelMetadata[] = [];
+
+  for (const channel of channels) {
+    const key = [
+      channel.channelCode ?? "",
+      channel.aap ?? "",
+      channel.typology ?? "",
+      channel.site ?? "",
+    ].join("|");
+
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    result.push(channel);
+  }
+
+  return result;
 }
 
 function getCacheScope(filters: MetricsFilters, invokerTx: string): string {
@@ -393,6 +448,8 @@ function buildRhoSpanSearchUrl(params: {
       "collection",
       "databaseQuery",
       "site",
+      "aap",
+      "typology",
     ].join(",")
   );
   url.searchParams.set("profile", "default");
@@ -418,6 +475,203 @@ function buildRhoTraceUrl(params: {
   url.searchParams.set("crossRegion", "false");
 
   return url.toString();
+}
+
+function buildRhoSpanDetailUrl(params: {
+  spanId: string;
+  fromDate: string;
+  toDate: string;
+}): string {
+  const { spanId, fromDate, toDate } = params;
+
+  const url = new URL(
+    `/v1/ns/apx.online/mrs/RhoTraces/spans/${spanId}`,
+    RHO_BASE
+  );
+
+  url.searchParams.set("profile", "default");
+  url.searchParams.set("fromDate", fromDate);
+  url.searchParams.set("toDate", toDate);
+
+  return url.toString();
+}
+
+function isRawSpan(value: unknown): value is RawSpan {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const candidate = value as Partial<RawSpan>;
+
+  return Boolean(
+    candidate.properties ||
+    candidate.spanId ||
+    candidate.traceId ||
+    candidate.name
+  );
+}
+
+function unwrapRhoSpanDetail(response: RhoSpanDetailResponse): RawSpan | null {
+  if (!response || typeof response !== "object") {
+    return null;
+  }
+
+  if (isRawSpan(response)) {
+    return response;
+  }
+
+  const wrapper = response as {
+    data?: unknown;
+    span?: unknown;
+    item?: unknown;
+  };
+
+  if (isRawSpan(wrapper.data)) {
+    return wrapper.data;
+  }
+
+  if (isRawSpan(wrapper.span)) {
+    return wrapper.span;
+  }
+
+  if (isRawSpan(wrapper.item)) {
+    return wrapper.item;
+  }
+
+  return null;
+}
+
+function collectChannelMetadataFromTrace(
+  node: RawSpan | RawSpan[] | null | undefined,
+  out: TraceChannelMetadata[]
+): void {
+  if (!node) return;
+
+  if (Array.isArray(node)) {
+    node.forEach((item) => collectChannelMetadataFromTrace(item, out));
+    return;
+  }
+
+  const metadata = extractMetadataFromSpan(node);
+
+  if (metadata) {
+    out.push(metadata);
+  }
+
+  if (Array.isArray(node.children)) {
+    node.children.forEach((child) =>
+      collectChannelMetadataFromTrace(child, out)
+    );
+  }
+}
+
+function extractSpanMetadata(
+  span: RawSpan | null | undefined
+): TraceSpanMetadata {
+  const props = span?.properties ?? {};
+
+  const channelCode =
+    String(props["channel-code"] ?? "").trim() ||
+    String(props.channelCode ?? "").trim();
+
+  const aap = String(props.aap ?? "").trim();
+  const typology = String(props.typology ?? "").trim();
+  const site = String(props.site ?? "").trim();
+
+  return {
+    channelCode: channelCode || undefined,
+    aap: aap || undefined,
+    typology: typology || undefined,
+    site: site || undefined,
+  };
+}
+
+export async function fetchTraceChannelsForInvokerTx(
+  filters: MetricsFilters,
+  invokerTx: string,
+  responseTimeMs?: number,
+  invokerLibraryHint?: string,
+  invokerLibraryHints?: string[]
+): Promise<TraceChannelMetadata[]> {
+  const libraryTraces = await fetchTracesByLibraries({
+    filters,
+    invokerTx,
+    responseTimeMs,
+    invokerLibraryHint,
+    invokerLibraryHints,
+  });
+
+  const channels: TraceChannelMetadata[] = [];
+
+  if (libraryTraces.length > 0) {
+    for (const trace of libraryTraces) {
+      collectChannelMetadataFromTrace(trace, channels);
+    }
+
+    return dedupeTraceChannels(channels);
+  }
+
+  const hintSpan = await searchBestSpan(
+    filters,
+    invokerTx,
+    responseTimeMs,
+    invokerLibraryHint
+  );
+
+  if (!hintSpan?.spanId) {
+    return [];
+  }
+
+  const trace = await fetchFullTraceByHintSpan({
+    filters,
+    invokerTx,
+    hintSpan,
+  });
+
+  if (!trace) {
+    return [];
+  }
+
+  collectChannelMetadataFromTrace(trace, channels);
+
+  return dedupeTraceChannels(channels);
+}
+
+export async function fetchTraceSpanMetadata(
+  filters: MetricsFilters,
+  spanId: string
+): Promise<TraceSpanMetadata> {
+  if (!spanId?.trim()) {
+    return {};
+  }
+
+  const { from, to } = dateRangeToNano(filters.fromDate, filters.toDate);
+
+  const url = buildRhoSpanDetailUrl({
+    spanId: spanId.trim(),
+    fromDate: from,
+    toDate: to,
+  });
+
+  console.log("[RHO span detail metadata URL]", {
+    spanId,
+    url,
+  });
+
+  const response = await apiRequest<RhoSpanDetailResponse>(url, {
+    headers: buildAuthHeaders(filters.bearerToken),
+  });
+
+  const span = unwrapRhoSpanDetail(response);
+  const metadata = extractSpanMetadata(span);
+
+  console.log("[RHO span detail metadata]", {
+    spanId,
+    span,
+    metadata,
+  });
+
+  return metadata;
 }
 
 function sortSpansByDurationTarget(
@@ -448,6 +702,10 @@ function validSearchSpans(items: RawSpan[]): RawSpan[] {
   );
 }
 
+function shouldUseStrictChannel(filters: MetricsFilters): boolean {
+  return getSelectedChannelCodes(filters).length > 0;
+}
+
 async function searchBestSpan(
   filters: MetricsFilters,
   invokerTx: string,
@@ -460,8 +718,8 @@ async function searchBestSpan(
 
   const targetDuration =
     typeof responseTimeMs === "number" &&
-    Number.isFinite(responseTimeMs) &&
-    responseTimeMs > 0
+      Number.isFinite(responseTimeMs) &&
+      responseTimeMs > 0
       ? Math.round(responseTimeMs)
       : undefined;
 
@@ -572,13 +830,21 @@ async function searchBestSpan(
     },
   ];
 
-  for (const attempt of attempts) {
-    const span = await search(attempt);
+const strictChannel = shouldUseStrictChannel(filters);
 
-    if (span) return span;
+const filteredAttempts = strictChannel
+  ? attempts.filter((attempt) => attempt.useChannelFilter)
+  : attempts;
+
+for (const attempt of filteredAttempts) {
+  const span = await search(attempt);
+
+  if (span) {
+    return span;
   }
+}
 
-  return null;
+return null;
 }
 
 async function searchSpansByLibraries(
@@ -605,8 +871,8 @@ async function searchSpansByLibraries(
 
   const targetDuration =
     typeof responseTimeMs === "number" &&
-    Number.isFinite(responseTimeMs) &&
-    responseTimeMs > 0
+      Number.isFinite(responseTimeMs) &&
+      responseTimeMs > 0
       ? Math.round(responseTimeMs)
       : undefined;
 
@@ -702,6 +968,142 @@ async function searchSpansByLibraries(
   return [];
 }
 
+function getSpanProperty(span: RawSpan | null | undefined, key: string): string {
+  return String(span?.properties?.[key] ?? "").trim();
+}
+
+function isTransactionSpan(span: RawSpan, invokerTx: string): boolean {
+  const type = getSpanProperty(span, "type");
+  const name = String(span.name ?? "").trim();
+  const spanInvokerTx = getSpanProperty(span, "invokerTx");
+
+  return (
+    type === "Transaction" ||
+    name === invokerTx ||
+    spanInvokerTx === invokerTx
+  );
+}
+
+function hasChannelMetadata(span: RawSpan): boolean {
+  const props = span.properties ?? {};
+
+  return Boolean(
+    String(props["channel-code"] ?? "").trim() ||
+    String(props.channelCode ?? "").trim() ||
+    String(props.aap ?? "").trim()
+  );
+}
+
+function isLikelyRootSpan(span: SpanWithParent): boolean {
+  const parentSpanId = String(span.parentSpanId ?? span.parentId ?? "").trim();
+  const parentSpan = String(span.parentSpan ?? "").trim();
+
+  if (!parentSpanId && !parentSpan) {
+    return true;
+  }
+
+
+  if (parentSpan.includes("/spans/")) {
+    return false;
+  }
+
+  return !parentSpanId;
+}
+
+async function searchTransactionSpanIdByTraceId(params: {
+  filters: MetricsFilters;
+  traceId: string;
+  invokerTx: string;
+  fallbackSpanId: string;
+}): Promise<string> {
+  const { filters, traceId, invokerTx, fallbackSpanId } = params;
+
+  const { from, to } = dateRangeToNano(filters.fromDate, filters.toDate);
+  const headers = buildAuthHeaders(filters.bearerToken);
+
+  const url = buildRhoSpanSearchUrl({
+    traceId,
+    invokerTx,
+    fromDate: from,
+    toDate: to,
+    site: filters.site,
+    includeDuration: false,
+  });
+
+  /**
+   * IMPORTANTE:
+   * buildRhoSpanSearchUrl usa name == "**" por default.
+   * Para encontrar el transaction span, forzamos name == "{invokerTx}".
+   */
+  const rawUrl = new URL(url);
+  const q = [
+    `name == "${invokerTx}"`,
+    `traceId == "${traceId}"`,
+    filters.site ? `properties.site == "${filters.site}"` : undefined,
+    `properties.invokerTx == "${invokerTx}"`,
+  ]
+    .filter(Boolean)
+    .join(" and ");
+
+  rawUrl.searchParams.set("q", q);
+
+  console.log("[RHO transaction span search URL]", {
+    invokerTx,
+    traceId,
+    url: rawUrl.toString(),
+  });
+
+  try {
+    const res = await apiRequest<SpansPaginatedResponse>(rawUrl.toString(), {
+      headers,
+    });
+
+    const items = Array.isArray(res.data) ? res.data : [];
+
+    const transaction =
+      items.find((span) => {
+        const type = String(span.properties?.type ?? "").trim();
+        const name = String(span.name ?? "").trim();
+        const channelCode =
+          String(span.properties?.["channel-code"] ?? "").trim() ||
+          String(span.properties?.channelCode ?? "").trim();
+
+        return (
+          type === "Transaction" ||
+          name === invokerTx ||
+          Boolean(channelCode)
+        );
+      }) ?? items[0];
+
+    const spanId = String(transaction?.spanId ?? "").trim();
+
+    console.log("[RHO selected transaction span]", {
+      invokerTx,
+      traceId,
+      spanId,
+      name: transaction?.name,
+      type: transaction?.properties?.type,
+      channelCode:
+        transaction?.properties?.["channel-code"] ??
+        transaction?.properties?.channelCode,
+      aap: transaction?.properties?.aap,
+      typology: transaction?.properties?.typology,
+      fallbackSpanId,
+    });
+
+    return spanId || fallbackSpanId;
+  } catch (error) {
+    console.warn("[RHO] Error buscando transaction span", {
+      invokerTx,
+      traceId,
+      fallbackSpanId,
+      error,
+    });
+
+    return fallbackSpanId;
+  }
+}
+
 async function searchRootSpanIdByTraceId(params: {
   filters: MetricsFilters;
   traceId: string;
@@ -762,16 +1164,43 @@ async function searchRootSpanIdByTraceId(params: {
       return null;
     }
 
-    const root =
-      items.find((span) => {
-        const parentSpanId = String(
-          span.parentSpanId ?? span.parentId ?? ""
-        ).trim();
+    const transactionWithChannel = items.find((span) => {
+      return isTransactionSpan(span, invokerTx) && hasChannelMetadata(span);
+    });
 
-        return !parentSpanId;
-      }) ?? items.sort((a, b) => normalizeDuration(b) - normalizeDuration(a))[0];
+    const transactionSpan = items.find((span) => {
+      return isTransactionSpan(span, invokerTx);
+    });
+
+    const rootLikeSpan = items.find((span) => {
+      return isLikelyRootSpan(span);
+    });
+
+    const spanWithChannel = items.find((span) => {
+      return hasChannelMetadata(span);
+    });
+
+    const root =
+      transactionWithChannel ??
+      transactionSpan ??
+      rootLikeSpan ??
+      spanWithChannel ??
+      items.sort((a, b) => normalizeDuration(b) - normalizeDuration(a))[0];
 
     const rootSpanId = String(root?.spanId ?? "").trim();
+
+    console.log("[RHO selected root span]", {
+      invokerTx,
+      traceId,
+      rootSpanId,
+      rootName: root?.name,
+      rootType: root?.properties?.type,
+      rootChannelCode:
+        root?.properties?.["channel-code"] ?? root?.properties?.channelCode,
+      rootAap: root?.properties?.aap,
+      rootTypology: root?.properties?.typology,
+      fallbackSpanId,
+    });
 
     console.log("[RHO selected root span]", {
       traceId,
@@ -866,11 +1295,11 @@ async function fetchFullTraceByHintSpan(params: {
 
   const rootSpanId = traceId
     ? await searchRootSpanIdByTraceId({
-        filters,
-        traceId,
-        invokerTx,
-        fallbackSpanId: hintSpanId,
-      })
+      filters,
+      traceId,
+      invokerTx,
+      fallbackSpanId: hintSpanId,
+    })
     : hintSpanId;
 
   const url = buildRhoTraceUrl({
@@ -918,6 +1347,107 @@ function getLimitedUniqueHintSpans(spans: RawSpan[]): RawSpan[] {
   }
 
   return uniqueHintSpans;
+}
+
+export async function fetchMetadataForInvokerTx(
+  filters: MetricsFilters,
+  invokerTx: string,
+  responseTimeMs?: number,
+  invokerLibraryHint?: string,
+  invokerLibraryHints?: string[]
+): Promise<TraceSpanMetadata> {
+  const cleanHints = Array.from(
+    new Set(
+      [...(invokerLibraryHints ?? []), invokerLibraryHint]
+        .map((item) => String(item ?? "").trim())
+        .filter(Boolean)
+    )
+  );
+
+  let hintSpan: RawSpan | null = null;
+
+  if (cleanHints.length > 0) {
+    const spans = await searchSpansByLibraries(
+      filters,
+      invokerTx,
+      cleanHints,
+      responseTimeMs
+    );
+
+    hintSpan = getLimitedUniqueHintSpans(spans)[0] ?? null;
+  }
+
+  if (!hintSpan) {
+    hintSpan = await searchBestSpan(
+      filters,
+      invokerTx,
+      responseTimeMs,
+      invokerLibraryHint
+    );
+  }
+
+  const hintSpanId = String(hintSpan?.spanId ?? "").trim();
+  const traceId = String(hintSpan?.traceId ?? "").trim();
+
+  if (!hintSpanId) {
+    console.warn("[RHO metadata] No se encontró spanId", {
+      invokerTx,
+      responseTimeMs,
+      invokerLibraryHint,
+      invokerLibraryHints: cleanHints,
+    });
+
+    return {};
+  }
+
+  const rootSpanId = traceId
+    ? await searchRootSpanIdByTraceId({
+      filters,
+      traceId,
+      invokerTx,
+      fallbackSpanId: hintSpanId,
+    })
+    : hintSpanId;
+
+  let rootMetadata = await fetchTraceSpanMetadata(filters, rootSpanId);
+
+  /**
+   * Si el root encontrado no trae channel-code, probablemente seguimos en un span hijo
+   * tipo JDBC/Library. Entonces buscamos explícitamente el span Transaction.
+   */
+  if (traceId && !rootMetadata.channelCode) {
+    const transactionSpanId = await searchTransactionSpanIdByTraceId({
+      filters,
+      traceId,
+      invokerTx,
+      fallbackSpanId: rootSpanId,
+    });
+
+    const transactionMetadata = await fetchTraceSpanMetadata(
+      filters,
+      transactionSpanId
+    );
+
+    rootMetadata = {
+      ...rootMetadata,
+      ...transactionMetadata,
+      channelCode: transactionMetadata.channelCode || rootMetadata.channelCode,
+      aap: transactionMetadata.aap || rootMetadata.aap,
+      typology: transactionMetadata.typology || rootMetadata.typology,
+      site: transactionMetadata.site || rootMetadata.site,
+    };
+  }
+
+  if (
+    rootMetadata.channelCode ||
+    rootMetadata.aap ||
+    rootMetadata.typology ||
+    rootMetadata.site
+  ) {
+    return rootMetadata;
+  }
+
+  return fetchTraceSpanMetadata(filters, hintSpanId);
 }
 
 function getSqlMethod(databaseQuery: string): string {
@@ -1084,10 +1614,10 @@ function getEntryLibrary(item: TraceEntry): string {
 function getEntryInvokedParam(item: TraceEntry): string {
   return String(
     item.invokedparam ||
-      item.databaseQuery ||
-      item.collection ||
-      item.name ||
-      ""
+    item.databaseQuery ||
+    item.collection ||
+    item.name ||
+    ""
   ).trim();
 }
 

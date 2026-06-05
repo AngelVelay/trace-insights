@@ -1,6 +1,6 @@
 import { Copy } from "lucide-react";
 import { toast } from "sonner";
-import type { MetricRow } from "@/types/bbva";
+import { GROUPED_CHANNEL_CODES, type MetricRow } from "@/types/bbva";
 import { buildAwsAnalysisReport } from "@/services/awsReportBuilder";
 import { Button } from "@/components/ui/button";
 import {
@@ -12,8 +12,22 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
+type TraceChannelMetadata = {
+  channelCode?: string;
+  aap?: string;
+  typology?: string;
+  site?: string;
+};
+
 type InvokerTxMeta = {
   invokerTx?: string;
+  channelCode?: string;
+  aap?: string;
+  typology?: string;
+  traceChannelCode?: string;
+  traceAap?: string;
+  traceTypology?: string;
+  traceChannels?: TraceChannelMetadata[];
   sum_num_executions?: number;
   mean_span_duration?: number;
   sum_functional_error?: number;
@@ -45,6 +59,223 @@ interface MetricsTableProps {
   errorMessage?: string | null;
   selectedInvokerTx?: string | null;
   onSelectInvokerTx?: (invokerTx: string, channelCode?: string) => void;
+}
+
+type GroupedChannelApplication = {
+  channel: string;
+  name: string;
+  aap: number | string;
+};
+
+function findChannelByCode(
+  channelCode?: string | null,
+): GroupedChannelApplication | null {
+  const cleanChannel = String(channelCode ?? "").trim();
+
+  if (!cleanChannel || cleanChannel === "-") {
+    return null;
+  }
+
+  const applications = GROUPED_CHANNEL_CODES[
+    cleanChannel as keyof typeof GROUPED_CHANNEL_CODES
+  ] as GroupedChannelApplication[] | undefined;
+
+  return applications?.[0] ?? null;
+}
+
+function findChannelByAap(
+  aapValue?: string | number | null,
+): GroupedChannelApplication | null {
+  const cleanAap = String(aapValue ?? "").trim();
+
+  if (!cleanAap || cleanAap === "-") {
+    return null;
+  }
+
+  for (const applications of Object.values(GROUPED_CHANNEL_CODES)) {
+    const match = (applications as GroupedChannelApplication[]).find((item) => {
+      return String(item.aap ?? "").trim() === cleanAap;
+    });
+
+    if (match) {
+      return match;
+    }
+  }
+
+  return null;
+}
+
+function getTraceChannelsFromRow(row: MetricRow): TraceChannelMetadata[] {
+  const meta = parseInvokerTx(row.invokerTx);
+
+  if (Array.isArray(row.traceChannels) && row.traceChannels.length > 0) {
+    return row.traceChannels;
+  }
+
+  if (Array.isArray(meta.traceChannels) && meta.traceChannels.length > 0) {
+    return meta.traceChannels;
+  }
+
+  const fallback: TraceChannelMetadata[] = [];
+
+  if (row.traceChannelCode || row.traceAap || row.traceTypology) {
+    fallback.push({
+      channelCode: row.traceChannelCode,
+      aap: row.traceAap,
+      typology: row.traceTypology,
+    });
+  }
+
+  return fallback;
+}
+
+function renderMappedChannelLines(
+  prefix: string,
+  channel: TraceChannelMetadata,
+): string[] {
+  const mapped =
+    findChannelByAap(channel.aap) || findChannelByCode(channel.channelCode);
+
+  if (mapped) {
+    return [
+      `• ${prefix}: ${mapped.channel}`,
+      `  Nombre: ${mapped.name}`,
+      `  AAP: ${mapped.aap}`,
+      channel.typology ? `  Zona: ${channel.typology}` : "",
+    ].filter(Boolean);
+  }
+
+  return [
+    channel.channelCode ? `• ${prefix}: ${channel.channelCode}` : "",
+    channel.aap ? `  AAP: ${channel.aap}` : "",
+    channel.typology ? `  Zona: ${channel.typology}` : "",
+  ].filter(Boolean);
+}
+
+function renderChannelCell(row: MetricRow) {
+  const meta = parseInvokerTx(row.invokerTx);
+
+  const searchedChannel: TraceChannelMetadata = {
+    channelCode:
+      String(row.channelCode ?? "").trim() ||
+      String(meta.channelCode ?? "").trim(),
+    aap:
+      String(row.aap ?? "").trim() ||
+      String(meta.aap ?? "").trim(),
+    typology:
+      String(row.typology ?? "").trim() ||
+      String(meta.typology ?? "").trim(),
+  };
+
+  const traceChannels = getTraceChannelsFromRow(row);
+
+  const cards: Array<{
+    title: string;
+    channelCode?: string;
+    name?: string;
+    aap?: string | number;
+    typology?: string;
+    site?: string;
+  }> = [];
+
+  const searchedMapped =
+    findChannelByAap(searchedChannel.aap) ||
+    findChannelByCode(searchedChannel.channelCode);
+
+  if (searchedMapped || searchedChannel.channelCode || searchedChannel.aap) {
+    cards.push({
+      title: "Canal buscado",
+      channelCode: searchedMapped?.channel || searchedChannel.channelCode,
+      name: searchedMapped?.name,
+      aap: searchedMapped?.aap || searchedChannel.aap,
+      typology: searchedChannel.typology,
+      site: searchedChannel.site,
+    });
+  }
+
+  const seen = new Set<string>();
+
+  for (const traceChannel of traceChannels) {
+    const mapped =
+      findChannelByAap(traceChannel.aap) ||
+      findChannelByCode(traceChannel.channelCode);
+
+    const channelCode = mapped?.channel || traceChannel.channelCode;
+    const aap = mapped?.aap || traceChannel.aap;
+    const name = mapped?.name;
+
+    const key = [
+      channelCode ?? "",
+      aap ?? "",
+      traceChannel.typology ?? "",
+      traceChannel.site ?? "",
+    ].join("|");
+
+    const sameAsSearched =
+      String(channelCode ?? "") === String(searchedMapped?.channel ?? searchedChannel.channelCode ?? "") &&
+      String(aap ?? "") === String(searchedMapped?.aap ?? searchedChannel.aap ?? "");
+
+    if (sameAsSearched || seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+
+    cards.push({
+      title: " Otro Canal",
+      channelCode,
+      name,
+      aap,
+      typology: traceChannel.typology,
+      site: traceChannel.site,
+    });
+  }
+
+  if (!cards.length) {
+    return <span className="text-muted-foreground">-</span>;
+  }
+
+  return (
+    <div className="max-h-56 min-w-[240px] space-y-2 overflow-auto rounded-lg border border-border bg-muted/20 p-2">
+      {cards.map((card, index) => (
+        <div
+          key={`${card.title}-${card.channelCode ?? "-"}-${card.aap ?? "-"}-${index}`}
+          className="rounded-lg border border-border bg-card p-2 text-xs shadow-sm"
+        >
+          <div className="mb-1 font-semibold text-primary">{card.title}</div>
+
+          <div className="space-y-0.5 font-mono">
+            <div>
+              <span className="text-muted-foreground">Canal:</span>{" "}
+              <span className="font-semibold">{card.channelCode || "-"}</span>
+            </div>
+
+            {card.name ? (
+              <div>
+                <span className="text-muted-foreground">Nombre:</span>{" "}
+                <span>{card.name}</span>
+              </div>
+            ) : null}
+
+            <div>
+              <span className="text-muted-foreground">AAP:</span>{" "}
+              <span>{card.aap || "-"}</span>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function renderTypologyCell(row: MetricRow): string {
+  const meta = parseInvokerTx(row.invokerTx);
+
+  return (
+    String(row.typology ?? "").trim() ||
+    String(meta.typology ?? "").trim() ||
+    "-"
+  );
 }
 
 function safeJsonParse<T>(value: unknown, fallback: T): T {
@@ -131,7 +362,7 @@ function getJdbcMethodsFromTrace(trace: unknown): string[] {
   const text = String(trace ?? "");
 
   const jdbcMatch = text.match(
-    /JDBC([\s\S]*?)(?:\n(?:CICS|JPA|MONGO CONNECTOR|API-CONNECTOR INTERNO|API-CONNECTOR EXTERNO|API-CONNECTOR|TITAN CLIENT|GRPC CLIENT|OTROS|🔵)\n|$)/i
+    /JDBC([\s\S]*?)(?:\n(?:CICS|JPA|MONGO CONNECTOR|API-CONNECTOR INTERNO|API-CONNECTOR EXTERNO|API-CONNECTOR|TITAN CLIENT|GRPC CLIENT|OTROS|🔵)\n|$)/i,
   );
 
   const jdbcBlock = jdbcMatch?.[1] ?? "";
@@ -161,7 +392,7 @@ function buildJdbcAccessType(row: MetricRow): string {
   }
 
   const hasWrite = methods.some((method) =>
-    ["INSERT", "UPDATE", "DELETE"].includes(method)
+    ["INSERT", "UPDATE", "DELETE"].includes(method),
   );
 
   if (hasWrite) {
@@ -193,7 +424,7 @@ function renderInvokerTxCell(
   value: unknown,
   selectedInvokerTx?: string | null,
   onSelectInvokerTx?: (invokerTx: string, channelCode?: string) => void,
-  channelCode?: string
+  channelCode?: string,
 ) {
   const meta = renderInvokerTxValue(value);
   const selected = selectedInvokerTx === meta.invokerTx;
@@ -388,7 +619,8 @@ export default function MetricsTable({
           <TableHeader className="sticky top-0 z-10 bg-card">
             <TableRow>
               <TableHead className="min-w-[100px]">Site</TableHead>
-              <TableHead className="min-w-[100px]">Canal</TableHead>
+              <TableHead className="min-w-[150px]">Canal</TableHead>
+              <TableHead className="min-w-[160px]">Zona de Ejecución</TableHead>
               <TableHead className="min-w-[180px]">InvokerTx</TableHead>
               <TableHead className="min-w-[160px]">InvokerTx simple</TableHead>
               <TableHead className="min-w-[220px]">Library</TableHead>
@@ -405,7 +637,7 @@ export default function MetricsTable({
             {!rows.length && !loading ? (
               <TableRow>
                 <TableCell
-                  colSpan={11}
+                  colSpan={12}
                   className="h-32 text-center text-sm text-muted-foreground"
                 >
                   Sin métricas para mostrar.
@@ -431,8 +663,12 @@ export default function MetricsTable({
                     {row.site || "-"}
                   </TableCell>
 
+                  <TableCell className="align-center font-mono text-xs font-semibold">
+                    {renderChannelCell(row)}
+                  </TableCell>
+
                   <TableCell className="font-mono text-xs font-semibold">
-                    {row.channelCode || "-"}
+                    {renderTypologyCell(row)}
                   </TableCell>
 
                   <TableCell>
@@ -440,7 +676,7 @@ export default function MetricsTable({
                       row.invokerTx,
                       selectedInvokerTx,
                       onSelectInvokerTx,
-                      channelCode
+                      channelCode,
                     )}
                   </TableCell>
 
