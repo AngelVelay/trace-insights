@@ -641,13 +641,13 @@ export async function fetchAwsInformComparison(params: {
   const avgDurationLive02 =
     rows.length > 0
       ? rows.reduce((sum, row) => sum + row.live02.meanDurationMs, 0) /
-      rows.length
+        rows.length
       : 0;
 
   const avgDurationLive04 =
     rows.length > 0
       ? rows.reduce((sum, row) => sum + row.live04.meanDurationMs, 0) /
-      rows.length
+        rows.length
       : 0;
 
   onProgress?.("Informe AWS generado");
@@ -813,25 +813,13 @@ async function fetchFullMetricsSingleChannel(
       .map((bucket) => ({
         invokerLibrary: String(
           bucket.bucket?.invokerLibrary ??
-          bucket.bucket?.["invokerLibrary"] ??
-          bucket.bucket?.name ??
-          ""
+            bucket.bucket?.["invokerLibrary"] ??
+            bucket.bucket?.name ??
+            ""
         ).trim(),
         count: Number(bucket.values?.count_utility_count ?? 0),
       }))
       .filter((item) => item.invokerLibrary.length > 0);
-
-    const selectedInvokerLibraryForTrace =
-      libraries.length > 0
-        ? libraries[Math.floor(Math.random() * libraries.length)].invokerLibrary
-        : undefined;
-
-    console.log("[metricsService selected library for trace]", {
-      invokerTx: txMeta.invokerTx,
-      channelCode: txRow.channelCode,
-      selectedInvokerLibraryForTrace,
-      libraries,
-    });
 
     const utilityTypeBlocks: Array<{
       invokerLibrary: string;
@@ -859,9 +847,9 @@ async function fetchFullMetricsSingleChannel(
           invokerLibrary: library.invokerLibrary,
           utilitytype: String(
             bucket.bucket?.utilitytype ??
-            bucket.bucket?.["utilitytype"] ??
-            bucket.bucket?.name ??
-            ""
+              bucket.bucket?.["utilitytype"] ??
+              bucket.bucket?.name ??
+              ""
           ).trim(),
           count: Number(bucket.values?.count_utility_count ?? 0),
         }))
@@ -889,9 +877,9 @@ async function fetchFullMetricsSingleChannel(
             utilitytype: utility.utilitytype,
             invokedparam: String(
               bucket.bucket?.invokedparam ??
-              bucket.bucket?.["invokedparam"] ??
-              bucket.bucket?.name ??
-              ""
+                bucket.bucket?.["invokedparam"] ??
+                bucket.bucket?.name ??
+                ""
             ).trim(),
             count: Number(bucket.values?.count_utility_count ?? 0),
             maxDuration: Number(bucket.values?.max_utility_duration ?? 0),
@@ -908,18 +896,27 @@ async function fetchFullMetricsSingleChannel(
 
     const responseTimeMs = Number(txMeta.mean_span_duration ?? 0);
 
+    const invokerLibraryHintsForTrace = libraries
+      .sort((a, b) => Number(b.count ?? 0) - Number(a.count ?? 0))
+      .slice(0, 5)
+      .map((item) => item.invokerLibrary)
+      .filter(Boolean);
+
+    const selectedInvokerLibraryForTrace = invokerLibraryHintsForTrace[0];
+
     console.log("[metricsService trace lookup]", {
       invokerTx: txMeta.invokerTx,
       channelCode: txRow.channelCode,
       responseTimeMs,
-      invokerLibraryHint: selectedInvokerLibraryForTrace,
+      invokerLibraryHintsForTrace,
     });
 
     const trace = await fetchTraceSummaryForInvokerTx(
       baseFilters,
       txMeta.invokerTx,
       responseTimeMs,
-      selectedInvokerLibraryForTrace
+      selectedInvokerLibraryForTrace,
+      invokerLibraryHintsForTrace
     );
 
     rows.push({

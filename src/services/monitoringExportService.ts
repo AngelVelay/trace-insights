@@ -1,631 +1,447 @@
 import type { MetricRow } from "@/types/bbva";
-import type { EnvironmentMonitoringDailyResult } from "@/services/environmentMonitoringService";
-import type { IncidentMonitoringResult } from "@/services/versionadoIncidentesService";
-import type { AwsInformComparisonResult } from "@/services/metricsService";
+import type {
+  AwsInformComparisonResult,
+  AwsInformComparisonRow,
+} from "@/services/metricsService";
+import { buildAwsAnalysisReport } from "@/services/awsReportBuilder";
 
-type Primitive = string | number;
-
-type InvokerTxItem = {
-  invokerTx: string;
-  sum_num_executions: number;
-  mean_span_duration: number;
+type InvokerTxMeta = {
+  invokerTx?: string;
+  sum_num_executions?: number;
+  mean_span_duration?: number;
   sum_functional_error?: number;
   sum_technical_error?: number;
 };
 
 type LibraryItem = {
-  invokerLibrary: string;
-  count: number;
+  invokerLibrary?: string;
+  count?: number;
 };
 
 type UtilityTypeItem = {
-  invokerLibrary: string;
-  utilitytype: string;
-  count: number;
+  invokerLibrary?: string;
+  utilitytype?: string;
+  count?: number;
 };
 
 type InvokedParamItem = {
-  invokerLibrary: string;
-  utilitytype: string;
-  invokedparam: string;
-  count: number;
-  maxDuration: number;
+  invokerLibrary?: string;
+  utilitytype?: string;
+  invokedparam?: string;
+  count?: number;
+  maxDuration?: number;
 };
 
-function escapeHtml(value: string): string {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+function normalizeUtilityLabel(utilityType: string): string {
+  const clean = utilityType.trim();
+
+  const map: Record<string, string> = {
+    Jdbc: "JDBC",
+    Jpa: "JPA",
+    DaasMongoConnector: "MONGO",
+    InterBackendCics: "CICS",
+    TitanClient: "TITAN",
+    APIInternalConnectorImpl: "API CONNECTOR INTERNAL",
+    APIExternalConnectorImpl: "API CONNECTOR EXTERNAL",
+    GRPCClient: "GRPC",
+  };
+
+  return map[clean] ?? clean.toUpperCase();
 }
 
-function escapeCsv(value: Primitive): string {
-  const text = String(value ?? "");
-  if (
-    text.includes(",") ||
-    text.includes('"') ||
-    text.includes("\n") ||
-    text.includes("\r")
-  ) {
-    return `"${text.replace(/"/g, '""')}"`;
+function renderUtilitySummaryCell(row: MetricRow): string {
+  const result = new Set<string>();
+
+  const utilityItems = safeJsonParse<UtilityTypeItem[]>(row.utilitytype, []);
+  const invokedItems = safeJsonParse<InvokedParamItem[]>(row.invokedparam, []);
+
+  for (const item of utilityItems) {
+    const utilityType = String(item.utilitytype ?? "").trim();
+
+    if (utilityType) {
+      result.add(normalizeUtilityLabel(utilityType));
+    }
   }
-  return text;
+
+  for (const item of invokedItems) {
+    const utilityType = String(item.utilitytype ?? "").trim();
+    const invokedparam = String(item.invokedparam ?? "").trim();
+
+    if (utilityType) {
+      result.add(normalizeUtilityLabel(utilityType));
+    }
+
+    if (/elastic/i.test(invokedparam)) {
+      result.add("ELASTIC");
+    }
+  }
+
+  if (/elastic/i.test(String(row.trace ?? ""))) {
+    result.add("ELASTIC");
+  }
+
+  return Array.from(result).join(", ") || "-";
 }
 
-function buildCsv(headers: string[], rows: Primitive[][]): string {
-  return [headers, ...rows]
-    .map((row) => row.map((cell) => escapeCsv(cell)).join(","))
-    .join("\n");
+function safeJsonParse<T>(value: unknown, fallback: T): T {
+  if (!value || typeof value !== "string" || value === "-") {
+    return fallback;
+  }
+
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
+  }
 }
 
-function buildTsv(headers: string[], rows: Primitive[][]): string {
-  return [headers, ...rows]
-    .map((row) => row.map((cell) => String(cell ?? "")).join("\t"))
-    .join("\n");
+function parseInvokerTx(value: unknown): InvokerTxMeta {
+  return safeJsonParse<InvokerTxMeta>(value, {});
 }
 
-function buildHtmlTable(headers: string[], rows: Primitive[][]): string {
-  const thead = `
-    <thead>
-      <tr>
-        ${headers
-          .map(
-            (header) =>
-              `<th style="border:1px solid #d1d5db;padding:8px;background:#f3f4f6;font-weight:700;text-align:left;">${escapeHtml(
-                header
-              )}</th>`
-          )
-          .join("")}
-      </tr>
-    </thead>
-  `;
-
-  const tbody = `
-    <tbody>
-      ${rows
-        .map(
-          (row) => `
-            <tr>
-              ${row
-                .map((cell) => {
-                  const html = escapeHtml(String(cell ?? "")).replace(/\n/g, "<br/>");
-                  return `<td style="border:1px solid #d1d5db;padding:8px;vertical-align:top;white-space:pre-wrap;">${html}</td>`;
-                })
-                .join("")}
-            </tr>
-          `
-        )
-        .join("")}
-    </tbody>
-  `;
-
-  return `
-    <table style="border-collapse:collapse;font-family:Arial, sans-serif;font-size:12px;">
-      ${thead}
-      ${tbody}
-    </table>
-  `;
-}
-
-export async function copyTableToGoogleSheets(
-  headers: string[],
-  rows: Primitive[][]
-): Promise<void> {
-  const html = buildHtmlTable(headers, rows);
-  const tsv = buildTsv(headers, rows);
-
-  await navigator.clipboard.write([
-    new ClipboardItem({
-      "text/html": new Blob([html], { type: "text/html" }),
-      "text/plain": new Blob([tsv], { type: "text/plain" }),
-    }),
-  ]);
-}
-
-function formatExecDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) return "0 ms";
-  if (ms >= 1000) return `${(ms / 1000).toFixed(2)} s`;
-  return `${ms.toFixed(2)} ms`;
+function formatNumber(value: number): string {
+  return Number(value || 0).toLocaleString("en-US");
 }
 
 function formatMs(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "0 ms";
-  if (value >= 1000) return `${(value / 1000).toFixed(2)} s`;
-  return `${value.toFixed(2)} ms`;
+  if (!Number.isFinite(value)) return "0.00 ms";
+
+  return `${value.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })} ms`;
 }
 
-function parseInvokerTxItem(value: unknown): InvokerTxItem | null {
-  if (!value) return null;
-
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!trimmed) return null;
-
-    try {
-      const parsed = JSON.parse(trimmed) as Partial<InvokerTxItem>;
-      if (!parsed?.invokerTx) return null;
-
-      return {
-        invokerTx: String(parsed.invokerTx),
-        sum_num_executions: Number(parsed.sum_num_executions ?? 0),
-        mean_span_duration: Number(parsed.mean_span_duration ?? 0),
-        sum_functional_error: Number(parsed.sum_functional_error ?? 0),
-        sum_technical_error: Number(parsed.sum_technical_error ?? 0),
-      };
-    } catch {
-      return {
-        invokerTx: trimmed,
-        sum_num_executions: 0,
-        mean_span_duration: 0,
-        sum_functional_error: 0,
-        sum_technical_error: 0,
-      };
-    }
-  }
-
-  if (typeof value === "object") {
-    const obj = value as Record<string, unknown>;
-    const invokerTx = String(obj.invokerTx ?? "").trim();
-    if (!invokerTx) return null;
-
-    return {
-      invokerTx,
-      sum_num_executions: Number(obj.sum_num_executions ?? 0),
-      mean_span_duration: Number(obj.mean_span_duration ?? 0),
-      sum_functional_error: Number(obj.sum_functional_error ?? 0),
-      sum_technical_error: Number(obj.sum_technical_error ?? 0),
-    };
-  }
-
-  return null;
+function normalizeMultilineText(value: unknown): string {
+  return String(value ?? "-")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .trim();
 }
 
-function parseLibraryItems(value: unknown): LibraryItem[] {
-  if (!value) return [];
-
-  if (Array.isArray(value)) {
-    return value
-      .map((item) => {
-        if (!item || typeof item !== "object") return null;
-        const obj = item as Record<string, unknown>;
-        return {
-          invokerLibrary: String(obj.invokerLibrary ?? "").trim(),
-          count: Number(obj.count ?? 0),
-        };
-      })
-      .filter(
-        (item): item is LibraryItem =>
-          Boolean(item && item.invokerLibrary.length > 0)
-      );
-  }
-
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!trimmed || trimmed === "-") return [];
-
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (Array.isArray(parsed)) return parseLibraryItems(parsed);
-    } catch {
-      return [];
-    }
-  }
-
-  return [];
+/**
+ * CSV:
+ * - Siempre usa comillas.
+ * - Conserva saltos de línea dentro de la celda.
+ * - Duplica comillas internas.
+ */
+function stringifyForCsv(value: unknown): string {
+  const text = normalizeMultilineText(value);
+  return `"${text.replace(/"/g, '""')}"`;
 }
 
-function parseUtilityTypeItems(value: unknown): UtilityTypeItem[] {
-  if (!value) return [];
+/**
+ * Google Sheets:
+ * - TSV.
+ * - Si la celda trae saltos de línea, tabs o comillas, se encierra en comillas.
+ * - Conserva saltos de línea dentro de la celda.
+ */
+function stringifyForSheets(value: unknown): string {
+  const text = normalizeMultilineText(value);
 
-  if (Array.isArray(value)) {
-    return value
-      .map((item) => {
-        if (!item || typeof item !== "object") return null;
-        const obj = item as Record<string, unknown>;
-        return {
-          invokerLibrary: String(obj.invokerLibrary ?? "").trim(),
-          utilitytype: String(obj.utilitytype ?? "").trim(),
-          count: Number(obj.count ?? 0),
-        };
-      })
-      .filter(
-        (item): item is UtilityTypeItem =>
-          Boolean(
-            item &&
-              item.invokerLibrary.length > 0 &&
-              item.utilitytype.length > 0
-          )
-      );
+  if (text.includes("\n") || text.includes("\t") || text.includes('"')) {
+    return `"${text.replace(/"/g, '""')}"`;
   }
 
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!trimmed || trimmed === "-") return [];
-
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (Array.isArray(parsed)) return parseUtilityTypeItems(parsed);
-    } catch {
-      return [];
-    }
-  }
-
-  return [];
+  return text;
 }
 
-function parseInvokedParamItems(value: unknown): InvokedParamItem[] {
-  if (!value) return [];
+function renderInvokerTxCell(row: MetricRow): string {
+  const meta = parseInvokerTx(row.invokerTx);
 
-  if (Array.isArray(value)) {
-    return value
-      .map((item) => {
-        if (!item || typeof item !== "object") return null;
-        const obj = item as Record<string, unknown>;
-        return {
-          invokerLibrary: String(obj.invokerLibrary ?? "").trim(),
-          utilitytype: String(obj.utilitytype ?? "").trim(),
-          invokedparam: String(obj.invokedparam ?? "").trim(),
-          count: Number(obj.count ?? 0),
-          maxDuration: Number(obj.maxDuration ?? 0),
-        };
-      })
-      .filter(
-        (item): item is InvokedParamItem =>
-          Boolean(
-            item &&
-              item.invokerLibrary.length > 0 &&
-              item.utilitytype.length > 0 &&
-              item.invokedparam.length > 0
-          )
-      );
-  }
-
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!trimmed || trimmed === "-") return [];
-
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (Array.isArray(parsed)) return parseInvokedParamItems(parsed);
-    } catch {
-      return [];
-    }
-  }
-
-  return [];
-}
-
-function renderInvokerTxText(value: unknown): string {
-  const item = parseInvokerTxItem(value);
-  if (!item) return "-";
+  const invokerTx = String(meta.invokerTx ?? "").trim() || "-";
+  const executions = Number(meta.sum_num_executions ?? row.utility_count ?? 0);
+  const duration = Number(
+    meta.mean_span_duration ?? row.mean_utility_duration ?? 0
+  );
 
   return [
-    item.invokerTx,
-    `${item.sum_num_executions} exec`,
-    formatExecDuration(item.mean_span_duration),
+    invokerTx,
+    `${formatNumber(executions)} exec`,
+    formatMs(duration),
   ].join("\n");
 }
 
-function renderLibraryText(value: unknown): string {
-  const items = parseLibraryItems(value);
-  if (!items.length) return "-";
+function renderSimpleInvokerTxCell(row: MetricRow): string {
+  const meta = parseInvokerTx(row.invokerTx);
+  return String(meta.invokerTx ?? "").trim() || "-";
+}
 
-  return items
-    .map((item) => [item.invokerLibrary, `${item.count} exec`].join("\n"))
+function renderLibraryCell(row: MetricRow): string {
+  const libraries = safeJsonParse<LibraryItem[]>(row.invokerLibrary, []);
+
+  if (!libraries.length) return "-";
+
+  return libraries
+    .map((item) => {
+      const library = String(item.invokerLibrary ?? "").trim() || "-";
+      const count = Number(item.count ?? 0);
+
+      return [library, `${formatNumber(count)} exec`].join("\n");
+    })
     .join("\n\n");
 }
 
-function renderUtilityTypeText(value: unknown): string {
-  const items = parseUtilityTypeItems(value);
+function renderUtilityTypeCell(row: MetricRow): string {
+  const items = safeJsonParse<UtilityTypeItem[]>(row.utilitytype, []);
+
   if (!items.length) return "-";
 
   return items
-    .map((item) =>
-      [item.invokerLibrary, item.utilitytype, `${item.count} exec`].join("\n")
-    )
+    .map((item) => {
+      const library = String(item.invokerLibrary ?? "").trim() || "-";
+      const utilitytype = String(item.utilitytype ?? "").trim() || "-";
+      const count = Number(item.count ?? 0);
+
+      return [
+        library,
+        utilitytype,
+        `${formatNumber(count)} exec`,
+      ].join("\n");
+    })
     .join("\n\n");
 }
 
-function renderInvokedParamText(value: unknown): string {
-  const items = parseInvokedParamItems(value);
+function renderInvokedParamCell(row: MetricRow): string {
+  const items = safeJsonParse<InvokedParamItem[]>(row.invokedparam, []);
+
   if (!items.length) return "-";
 
   return items
-    .map((item) =>
-      [
-        item.invokerLibrary,
-        item.utilitytype,
-        item.invokedparam,
-        `${item.count} exec`,
-        formatExecDuration(item.maxDuration),
-      ].join("\n")
-    )
+    .map((item) => {
+      const library = String(item.invokerLibrary ?? "").trim() || "-";
+      const utilitytype = String(item.utilitytype ?? "").trim() || "-";
+      const invokedparam = String(item.invokedparam ?? "").trim() || "-";
+      const count = Number(item.count ?? 0);
+      const maxDuration = Number(item.maxDuration ?? 0);
+
+      return [
+        library,
+        utilitytype,
+        invokedparam,
+        `${formatNumber(count)} exec`,
+        formatMs(maxDuration),
+      ].join("\n");
+    })
     .join("\n\n");
 }
 
-/* =========================
-   AWS MONITOREO - METRICAS / GRAFICAS
-========================= */
+function renderTraceCell(row: MetricRow): string {
+  return normalizeMultilineText(row.trace || "-");
+}
 
-function buildAwsMonitoringMatrix(rows: MetricRow[]): {
-  headers: string[];
-  rows: Primitive[][];
-} {
-  const headers = [
-    "Site",
-    "InvokerTx",
-    "InvokerTx simple",
-    "Library",
-    "UtilityType",
-    "InvokedParam",
-    "Trace",
-  ];
+function renderInformeAwsCell(row: MetricRow): string {
+  return buildAwsAnalysisReport(row);
+}
 
-  const matrix = rows.map((row) => {
-    const parsedInvokerTx = parseInvokerTxItem(row.invokerTx);
+const AWS_MONITORING_TABLE_HEADERS = [
+  "Site",
+  "Canal",
+  "InvokerTx",
+  "InvokerTx simple",
+  "Library",
+  "UtilityType",
+  "Resumen Utility",
+  "JDBC Tipo",
+  "InvokedParam",
+  "Trace",
+  "Informe AWS",
+];
 
+function getMonitoringTableRows(rows: MetricRow[]) {
+  return rows.map((row) => {
     return [
-      row.site,
-      renderInvokerTxText(row.invokerTx),
-      parsedInvokerTx?.invokerTx || "-",
-      renderLibraryText(row.invokerLibrary),
-      renderUtilityTypeText(row.utilitytype),
-      renderInvokedParamText(row.invokedparam),
-      String(row.trace ?? "").trim() || "-",
+      row.site || "-",
+      row.channelCode || "-",
+      renderInvokerTxCell(row),
+      renderSimpleInvokerTxCell(row),
+      renderLibraryCell(row),
+      renderUtilityTypeCell(row),
+      renderUtilitySummaryCell(row),
+      renderJdbcAccessTypeCell(row),
+      renderInvokedParamCell(row),
+      renderTraceCell(row),
+      renderInformeAwsCell(row),
     ];
   });
+}
 
-  return { headers, rows: matrix };
+
+function getJdbcMethodsFromTrace(trace: unknown): string[] {
+  const text = String(trace ?? "");
+
+  const jdbcMatch = text.match(
+    /JDBC([\s\S]*?)(?:\n(?:CICS|JPA|MONGO CONNECTOR|API-CONNECTOR INTERNO|API-CONNECTOR EXTERNO|API-CONNECTOR|TITAN CLIENT|GRPC CLIENT|OTROS|🔵)\n|$)/i,
+  );
+
+  const jdbcBlock = jdbcMatch?.[1] ?? "";
+
+  if (!jdbcBlock.trim()) {
+    return [];
+  }
+
+  const methods = new Set<string>();
+
+  for (const method of ["SELECT", "INSERT", "UPDATE", "DELETE"]) {
+    const regex = new RegExp(`\\b${method}\\s*:\\s*\\d+\\s*saltos`, "i");
+
+    if (regex.test(jdbcBlock)) {
+      methods.add(method);
+    }
+  }
+
+  return Array.from(methods);
+}
+
+function renderJdbcAccessTypeCell(row: MetricRow): string {
+  const methods = getJdbcMethodsFromTrace(row.trace);
+
+  if (!methods.length) {
+    return "-";
+  }
+
+  const hasWrite = methods.some((method) =>
+    ["INSERT", "UPDATE", "DELETE"].includes(method),
+  );
+
+  if (hasWrite) {
+    return "JDBC [WRITE]";
+  }
+
+  if (methods.includes("SELECT")) {
+    return "JDBC [READ_ONLY]";
+  }
+
+  return "-";
 }
 
 export function buildAwsMonitoringCsv(rows: MetricRow[]): string {
-  const matrix = buildAwsMonitoringMatrix(rows);
-  return buildCsv(matrix.headers, matrix.rows);
+  const header = AWS_MONITORING_TABLE_HEADERS.map(stringifyForCsv).join(",");
+
+  const body = getMonitoringTableRows(rows).map((row) => {
+    return row.map(stringifyForCsv).join(",");
+  });
+
+  return [header, ...body].join("\n");
 }
 
-export function buildAwsMonitoringSheetsText(rows: MetricRow[]): string {
-  const matrix = buildAwsMonitoringMatrix(rows);
-  return buildTsv(matrix.headers, matrix.rows);
+export async function copyAwsMonitoringToSheets(
+  rows: MetricRow[]
+): Promise<void> {
+  const header = AWS_MONITORING_TABLE_HEADERS.map(stringifyForSheets).join("\t");
+
+  const body = getMonitoringTableRows(rows).map((row) => {
+    return row.map(stringifyForSheets).join("\t");
+  });
+
+  const content = [header, ...body].join("\n");
+
+  await navigator.clipboard.writeText(content);
 }
 
-export async function copyAwsMonitoringToSheets(rows: MetricRow[]): Promise<void> {
-  const matrix = buildAwsMonitoringMatrix(rows);
-  await copyTableToGoogleSheets(matrix.headers, matrix.rows);
-}
+/**
+ * INFORM AWS EXPORTS
+ * Se conservan para que Dashboard.tsx no rompa imports:
+ * buildAwsInformCsv
+ * copyAwsInformToSheets
+ */
 
-/* =========================
-   AWS INFORM / COMPARATIVO LIVE-02 VS LIVE-04
-========================= */
+const AWS_INFORM_METRICS_HEADERS = [
+  "InvokerTX",
+  "Canal",
+  "LIVE-02 Ejecuciones",
+  "LIVE-04 Ejecuciones",
+  "Delta Ejecuciones",
+  "LIVE-02 Errores Tecnicos",
+  "LIVE-04 Errores Tecnicos",
+  "Delta Errores Tecnicos",
+  "LIVE-02 Tiempo Promedio MS",
+  "LIVE-04 Tiempo Promedio MS",
+  "Delta Tiempo Promedio MS",
+  "LIVE-02 Saltos",
+  "LIVE-04 Saltos",
+  "Delta Saltos",
+];
 
-function buildAwsInformMetricsMatrix(
-  result: AwsInformComparisonResult
-): {
-  headers: string[];
-  rows: Primitive[][];
-} {
-  const headers = [
-    "InvokerTx",
-    "Canal",
-    "LIVE-02 Exec",
-    "LIVE-02 Errors",
-    "LIVE-02 Jumps",
-    "LIVE-02 Resp",
-    "LIVE-04 Exec",
-    "LIVE-04 Errors",
-    "LIVE-04 Jumps",
-    "LIVE-04 Resp",
-    "Delta Exec",
-    "Delta Errors",
-    "Delta Jumps",
-    "Delta Resp",
-  ];
+const AWS_INFORM_TRACES_HEADERS = [
+  "InvokerTX",
+  "Canal",
+  "LIVE-02 Trace",
+  "LIVE-04 Trace",
+];
 
-  const rows = result.rows.map((row) => [
+function getAwsInformMetricsRow(
+  result: AwsInformComparisonResult,
+  row: AwsInformComparisonRow
+) {
+  return [
     row.invokerTx,
     result.channelCode || "-",
     row.live02.executions,
-    row.live02.technicalErrors,
-    row.live02.jumps,
-    formatMs(row.live02.meanDurationMs),
     row.live04.executions,
-    row.live04.technicalErrors,
-    row.live04.jumps,
-    formatMs(row.live04.meanDurationMs),
     row.deltaExecutions,
+    row.live02.technicalErrors,
+    row.live04.technicalErrors,
     row.deltaTechnicalErrors,
+    row.live02.meanDurationMs,
+    row.live04.meanDurationMs,
+    row.deltaMeanDurationMs,
+    row.live02.jumps,
+    row.live04.jumps,
     row.deltaJumps,
-    formatMs(row.deltaMeanDurationMs),
-  ]);
-
-  return { headers, rows };
+  ];
 }
 
-function buildAwsInformTracesMatrix(
-  result: AwsInformComparisonResult
-): {
-  headers: string[];
-  rows: Primitive[][];
-} {
-  const headers = ["InvokerTx", "Canal", "Trace LIVE-02", "Trace LIVE-04"];
-
-  const rows = result.rows.map((row) => [
+function getAwsInformTracesRow(
+  result: AwsInformComparisonResult,
+  row: AwsInformComparisonRow
+) {
+  return [
     row.invokerTx,
     result.channelCode || "-",
     row.live02.trace || "-",
     row.live04.trace || "-",
-  ]);
-
-  return { headers, rows };
+  ];
 }
 
 export function buildAwsInformCsv(
   result: AwsInformComparisonResult,
   view: "metrics" | "traces"
 ): string {
-  const matrix =
-    view === "metrics"
-      ? buildAwsInformMetricsMatrix(result)
-      : buildAwsInformTracesMatrix(result);
+  const headers =
+    view === "metrics" ? AWS_INFORM_METRICS_HEADERS : AWS_INFORM_TRACES_HEADERS;
 
-  return buildCsv(matrix.headers, matrix.rows);
-}
+  const rows = result.rows.map((row) => {
+    return view === "metrics"
+      ? getAwsInformMetricsRow(result, row)
+      : getAwsInformTracesRow(result, row);
+  });
 
-export function buildAwsInformSheetsText(
-  result: AwsInformComparisonResult,
-  view: "metrics" | "traces"
-): string {
-  const matrix =
-    view === "metrics"
-      ? buildAwsInformMetricsMatrix(result)
-      : buildAwsInformTracesMatrix(result);
+  const headerLine = headers.map(stringifyForCsv).join(",");
 
-  return buildTsv(matrix.headers, matrix.rows);
+  const body = rows.map((row) => row.map(stringifyForCsv).join(","));
+
+  return [headerLine, ...body].join("\n");
 }
 
 export async function copyAwsInformToSheets(
   result: AwsInformComparisonResult,
   view: "metrics" | "traces"
 ): Promise<void> {
-  const matrix =
-    view === "metrics"
-      ? buildAwsInformMetricsMatrix(result)
-      : buildAwsInformTracesMatrix(result);
+  const headers =
+    view === "metrics" ? AWS_INFORM_METRICS_HEADERS : AWS_INFORM_TRACES_HEADERS;
 
-  await copyTableToGoogleSheets(matrix.headers, matrix.rows);
-}
+  const rows = result.rows.map((row) => {
+    return view === "metrics"
+      ? getAwsInformMetricsRow(result, row)
+      : getAwsInformTracesRow(result, row);
+  });
 
-/* =========================
-   MONITOREO DE ENTORNOS
-========================= */
+  const headerLine = headers.map(stringifyForSheets).join("\t");
 
-function getEnvironmentPhaseLabel(phase: string): string {
-  if (phase === "before") return "Before";
-  if (phase === "installation") return "Día de instalación";
-  return "After";
-}
+  const body = rows.map((row) => row.map(stringifyForSheets).join("\t"));
 
-function buildEnvironmentMonitoringMatrix(result: EnvironmentMonitoringDailyResult): {
-  headers: string[];
-  rows: Primitive[][];
-} {
-  const headers = [
-    "Fase",
-    "Fecha",
-    "Technical Errors",
-    "Executions",
-    "Span Duration",
-  ];
+  const content = [headerLine, ...body].join("\n");
 
-  const rows = result.rows.map((row) => [
-    getEnvironmentPhaseLabel(row.phase),
-    row.date,
-    row.technicalErrors,
-    row.executions,
-    formatMs(row.meanSpanDuration),
-  ]);
-
-  rows.push([
-    "TOTAL",
-    "-",
-    result.totals.technicalErrors,
-    result.totals.executions,
-    formatMs(result.totals.meanSpanDuration),
-  ]);
-
-  return { headers, rows };
-}
-
-export function buildEnvironmentMonitoringCsv(
-  result: EnvironmentMonitoringDailyResult
-): string {
-  const matrix = buildEnvironmentMonitoringMatrix(result);
-  return buildCsv(matrix.headers, matrix.rows);
-}
-
-export function buildEnvironmentMonitoringSheetsText(
-  result: EnvironmentMonitoringDailyResult
-): string {
-  const matrix = buildEnvironmentMonitoringMatrix(result);
-  return buildTsv(matrix.headers, matrix.rows);
-}
-
-export async function copyEnvironmentMonitoringToSheets(
-  result: EnvironmentMonitoringDailyResult
-): Promise<void> {
-  const matrix = buildEnvironmentMonitoringMatrix(result);
-  await copyTableToGoogleSheets(matrix.headers, matrix.rows);
-}
-
-/* =========================
-   MONITOREO DE INCIDENTES
-========================= */
-
-function getIncidentPhaseLabel(phase: string): string {
-  if (phase === "before") return "Before";
-  if (phase === "installation") return "Instalación";
-  return "After";
-}
-
-function buildIncidentMonitoringMatrix(result: IncidentMonitoringResult): {
-  headers: string[];
-  rows: Primitive[][];
-} {
-  const headers = [
-    "Fase",
-    "Fecha",
-    "TRX",
-    "Exception",
-    "Description",
-    "Resumen IA",
-    "Detalle Errores controlados",
-    "Codigo de Error Controlado",
-    "APX Chanel",
-    "Fecha de Revision",
-    "Número de ejecuciones",
-    "Número de errores",
-    "Tiempo de respuesta (ms)",
-    "Tuvo mayor número de ejecuciones",
-    "Aumento el promedio de tiempo respuesta",
-  ];
-
-  const rows = result.rows.map((row) => [
-    getIncidentPhaseLabel(row.phase),
-    row.date,
-    row.trx || "-",
-    row.exception || "-",
-    row.description || "-",
-    row.resumenIA || "-",
-    row.detalleErroresControlados || "-",
-    row.codigoErrorControlado || "-",
-    row.apxChannel || "-",
-    row.fechaRevision || "-",
-    row.numeroEjecuciones,
-    row.numeroErrores,
-    formatMs(row.numeroTiempoRespuestaMs),
-    row.tuvoMayorNumeroEjecuciones,
-    row.aumentoPromedioTiempoRespuesta,
-  ]);
-
-  return { headers, rows };
-}
-
-export function buildIncidentMonitoringCsv(
-  result: IncidentMonitoringResult
-): string {
-  const matrix = buildIncidentMonitoringMatrix(result);
-  return buildCsv(matrix.headers, matrix.rows);
-}
-
-export function buildIncidentMonitoringSheetsText(
-  result: IncidentMonitoringResult
-): string {
-  const matrix = buildIncidentMonitoringMatrix(result);
-  return buildTsv(matrix.headers, matrix.rows);
-}
-
-export async function copyIncidentMonitoringToSheets(
-  result: IncidentMonitoringResult
-): Promise<void> {
-  const matrix = buildIncidentMonitoringMatrix(result);
-  await copyTableToGoogleSheets(matrix.headers, matrix.rows);
+  await navigator.clipboard.writeText(content);
 }

@@ -6,10 +6,37 @@ import type {
   MetricsFilters,
 } from "@/types/bbva";
 import { dateRangeToNano } from "./dateUtils";
-import { apiRequest, buildAuthHeaders } from "./httpClient";
+import {
+  apiRequest,
+  buildAuthHeaders,
+  createConcurrencyLimiter,
+} from "./httpClient";
 
 const RHO_BASE = "https://rho.live-02.nextgen.igrupobbva";
 const AWS_NETWORK_CONSTANT_MS = 89;
+
+/**
+ * Ajustes de performance.
+ *
+ * MAX_TRACE_IDS_PER_INVOKER:
+ * Limita cuántas trazas completas se traen por cada invokerTx.
+ * Si lo subes mucho, la consulta se vuelve lenta.
+ */
+const MAX_TRACE_IDS_PER_INVOKER = 3;
+
+/**
+ * Si está en true:
+ * span encontrado -> traceId -> rootSpanId -> trace completa.
+ *
+ * Si está en false:
+ * usa directamente el spanId encontrado. Más rápido, pero puede traer trazas parciales.
+ */
+const USE_ROOT_SPAN_LOOKUP = true;
+
+const traceLimiter = createConcurrencyLimiter(3);
+
+const traceCache = new Map<string, RawSpan>();
+const rootSpanCache = new Map<string, string>();
 
 type TraceEntry = {
   utilitytype: string;
@@ -42,6 +69,14 @@ function getSelectedChannelCodes(filters: MetricsFilters): string[] {
         .filter((code) => code && code !== "all")
     )
   );
+}
+
+function getCacheScope(filters: MetricsFilters, invokerTx: string): string {
+  return [
+    filters.site ?? "",
+    getSelectedChannelCodes(filters).join(","),
+    invokerTx,
+  ].join("|");
 }
 
 function normalizeDuration(span: RawSpan): number {
@@ -266,6 +301,8 @@ function buildRhoSpanSearchUrl(params: {
   channelCodes?: string[];
   durationMs?: number;
   invokerLibraryHint?: string;
+  invokerLibraryHints?: string[];
+  includeDuration?: boolean;
 }): string {
   const {
     invokerTx,
@@ -276,14 +313,30 @@ function buildRhoSpanSearchUrl(params: {
     channelCodes = [],
     durationMs,
     invokerLibraryHint,
+    invokerLibraryHints = [],
+    includeDuration = true,
   } = params;
 
-  const cleanInvokerLibraryHint = String(invokerLibraryHint ?? "").trim();
+  const cleanHints = Array.from(
+    new Set(
+      [...invokerLibraryHints, invokerLibraryHint]
+        .map((item) => String(item ?? "").trim())
+        .filter(Boolean)
+    )
+  );
 
   const filters: string[] = [];
 
-  if (cleanInvokerLibraryHint) {
-    filters.push(`name == "*${cleanInvokerLibraryHint}*"`);
+  if (cleanHints.length > 0) {
+    const nameClauses = cleanHints.map(
+      (library) => `name == "*${library}*"`
+    );
+
+    filters.push(
+      nameClauses.length === 1
+        ? nameClauses[0]
+        : `(${nameClauses.join(" or ")})`
+    );
   } else {
     filters.push(`name == "**"`);
   }
@@ -307,6 +360,7 @@ function buildRhoSpanSearchUrl(params: {
   }
 
   if (
+    includeDuration &&
     typeof durationMs === "number" &&
     Number.isFinite(durationMs) &&
     durationMs > 0
@@ -366,6 +420,34 @@ function buildRhoTraceUrl(params: {
   return url.toString();
 }
 
+function sortSpansByDurationTarget(
+  spans: RawSpan[],
+  targetDuration?: number
+): RawSpan[] {
+  return [...spans].sort((a, b) => {
+    if (targetDuration === undefined) {
+      return normalizeDuration(b) - normalizeDuration(a);
+    }
+
+    const diffA = Math.abs(normalizeDuration(a) - targetDuration);
+    const diffB = Math.abs(normalizeDuration(b) - targetDuration);
+
+    if (diffA !== diffB) return diffA - diffB;
+
+    return normalizeDuration(b) - normalizeDuration(a);
+  });
+}
+
+function validSearchSpans(items: RawSpan[]): RawSpan[] {
+  return items.filter(
+    (span) =>
+      typeof span.spanId === "string" &&
+      span.spanId.trim().length > 0 &&
+      typeof span.traceId === "string" &&
+      span.traceId.trim().length > 0
+  );
+}
+
 async function searchBestSpan(
   filters: MetricsFilters,
   invokerTx: string,
@@ -383,35 +465,9 @@ async function searchBestSpan(
       ? Math.round(responseTimeMs)
       : undefined;
 
-  const pickBestSpan = (items: RawSpan[]): RawSpan | undefined => {
-    const validItems = items.filter(
-      (span) =>
-        typeof span.spanId === "string" &&
-        span.spanId.trim().length > 0 &&
-        typeof span.traceId === "string" &&
-        span.traceId.trim().length > 0
-    );
-
-    if (!validItems.length) return undefined;
-
-    if (targetDuration !== undefined) {
-      return validItems.sort((a, b) => {
-        const diffA = Math.abs(normalizeDuration(a) - targetDuration);
-        const diffB = Math.abs(normalizeDuration(b) - targetDuration);
-
-        if (diffA !== diffB) return diffA - diffB;
-
-        return normalizeDuration(b) - normalizeDuration(a);
-      })[0];
-    }
-
-    return validItems.sort(
-      (a, b) => normalizeDuration(b) - normalizeDuration(a)
-    )[0];
-  };
-
   const search = async (params: {
     useLibraryHint: boolean;
+    useSiteFilter: boolean;
     useChannelFilter: boolean;
     useDurationFilter: boolean;
   }): Promise<RawSpan | null> => {
@@ -419,7 +475,7 @@ async function searchBestSpan(
       invokerTx,
       fromDate: from,
       toDate: to,
-      site: filters.site,
+      site: params.useSiteFilter ? filters.site : undefined,
       channelCodes: params.useChannelFilter ? channelCodes : [],
       durationMs:
         params.useDurationFilter && targetDuration !== undefined
@@ -428,10 +484,12 @@ async function searchBestSpan(
       invokerLibraryHint: params.useLibraryHint
         ? invokerLibraryHint
         : undefined,
+      includeDuration: params.useDurationFilter,
     });
 
     console.log("[RHO span search URL]", {
       invokerTx,
+      site: params.useSiteFilter ? filters.site : undefined,
       invokerLibraryHint: params.useLibraryHint
         ? invokerLibraryHint
         : undefined,
@@ -444,22 +502,19 @@ async function searchBestSpan(
     const res = await apiRequest<SpansPaginatedResponse>(url, { headers });
     const items = Array.isArray(res.data) ? res.data : [];
 
-    if (!items.length) return null;
-
-    const best = pickBestSpan(items);
+    const best = sortSpansByDurationTarget(
+      validSearchSpans(items),
+      targetDuration
+    )[0];
 
     if (best) {
-      console.log("[RHO selected child/hint span]", {
+      console.log("[RHO selected span]", {
         invokerTx,
         invokerLibraryHint,
-        targetDuration,
         selectedSpanId: best.spanId,
         selectedTraceId: best.traceId,
         selectedDuration: normalizeDuration(best),
-        diff:
-          targetDuration !== undefined
-            ? Math.abs(normalizeDuration(best) - targetDuration)
-            : undefined,
+        targetDuration,
       });
     }
 
@@ -469,31 +524,49 @@ async function searchBestSpan(
   const attempts = [
     {
       useLibraryHint: Boolean(invokerLibraryHint),
+      useSiteFilter: Boolean(filters.site),
       useChannelFilter: channelCodes.length > 0,
       useDurationFilter: targetDuration !== undefined,
     },
     {
       useLibraryHint: Boolean(invokerLibraryHint),
+      useSiteFilter: Boolean(filters.site),
       useChannelFilter: channelCodes.length > 0,
       useDurationFilter: false,
     },
     {
+      useLibraryHint: Boolean(invokerLibraryHint),
+      useSiteFilter: Boolean(filters.site),
+      useChannelFilter: false,
+      useDurationFilter: targetDuration !== undefined,
+    },
+    {
+      useLibraryHint: Boolean(invokerLibraryHint),
+      useSiteFilter: Boolean(filters.site),
+      useChannelFilter: false,
+      useDurationFilter: false,
+    },
+    {
       useLibraryHint: false,
+      useSiteFilter: Boolean(filters.site),
       useChannelFilter: channelCodes.length > 0,
       useDurationFilter: targetDuration !== undefined,
     },
     {
       useLibraryHint: false,
+      useSiteFilter: Boolean(filters.site),
       useChannelFilter: channelCodes.length > 0,
       useDurationFilter: false,
     },
     {
       useLibraryHint: false,
+      useSiteFilter: false,
       useChannelFilter: false,
       useDurationFilter: targetDuration !== undefined,
     },
     {
       useLibraryHint: false,
+      useSiteFilter: false,
       useChannelFilter: false,
       useDurationFilter: false,
     },
@@ -508,6 +581,127 @@ async function searchBestSpan(
   return null;
 }
 
+async function searchSpansByLibraries(
+  filters: MetricsFilters,
+  invokerTx: string,
+  invokerLibraryHints: string[],
+  responseTimeMs?: number
+): Promise<RawSpan[]> {
+  const { from, to } = dateRangeToNano(filters.fromDate, filters.toDate);
+  const headers = buildAuthHeaders(filters.bearerToken);
+  const channelCodes = getSelectedChannelCodes(filters);
+
+  const cleanHints = Array.from(
+    new Set(
+      invokerLibraryHints
+        .map((item) => String(item).trim())
+        .filter(Boolean)
+    )
+  );
+
+  if (!cleanHints.length) {
+    return [];
+  }
+
+  const targetDuration =
+    typeof responseTimeMs === "number" &&
+    Number.isFinite(responseTimeMs) &&
+    responseTimeMs > 0
+      ? Math.round(responseTimeMs)
+      : undefined;
+
+  const search = async (params: {
+    useSiteFilter: boolean;
+    useChannelFilter: boolean;
+    useDurationFilter: boolean;
+  }): Promise<RawSpan[]> => {
+    const url = buildRhoSpanSearchUrl({
+      invokerTx,
+      fromDate: from,
+      toDate: to,
+      site: params.useSiteFilter ? filters.site : undefined,
+      channelCodes: params.useChannelFilter ? channelCodes : [],
+      durationMs:
+        params.useDurationFilter && targetDuration !== undefined
+          ? targetDuration
+          : undefined,
+      invokerLibraryHints: cleanHints,
+      includeDuration: params.useDurationFilter,
+    });
+
+    console.log("[RHO multi-library span search URL]", {
+      invokerTx,
+      site: params.useSiteFilter ? filters.site : undefined,
+      channelCodes: params.useChannelFilter ? channelCodes : [],
+      invokerLibraryHints: cleanHints,
+      targetDuration,
+      useDurationFilter: params.useDurationFilter,
+      url,
+    });
+
+    const res = await apiRequest<SpansPaginatedResponse>(url, { headers });
+    const items = Array.isArray(res.data) ? res.data : [];
+
+    return sortSpansByDurationTarget(
+      validSearchSpans(items),
+      targetDuration
+    );
+  };
+
+  const attempts = [
+    {
+      useSiteFilter: Boolean(filters.site),
+      useChannelFilter: channelCodes.length > 0,
+      useDurationFilter: targetDuration !== undefined,
+    },
+    {
+      useSiteFilter: Boolean(filters.site),
+      useChannelFilter: channelCodes.length > 0,
+      useDurationFilter: false,
+    },
+    {
+      useSiteFilter: Boolean(filters.site),
+      useChannelFilter: false,
+      useDurationFilter: targetDuration !== undefined,
+    },
+    {
+      useSiteFilter: Boolean(filters.site),
+      useChannelFilter: false,
+      useDurationFilter: false,
+    },
+    {
+      useSiteFilter: false,
+      useChannelFilter: channelCodes.length > 0,
+      useDurationFilter: targetDuration !== undefined,
+    },
+    {
+      useSiteFilter: false,
+      useChannelFilter: channelCodes.length > 0,
+      useDurationFilter: false,
+    },
+    {
+      useSiteFilter: false,
+      useChannelFilter: false,
+      useDurationFilter: targetDuration !== undefined,
+    },
+    {
+      useSiteFilter: false,
+      useChannelFilter: false,
+      useDurationFilter: false,
+    },
+  ];
+
+  for (const attempt of attempts) {
+    const spans = await search(attempt);
+
+    if (spans.length > 0) {
+      return spans;
+    }
+  }
+
+  return [];
+}
+
 async function searchRootSpanIdByTraceId(params: {
   filters: MetricsFilters;
   traceId: string;
@@ -515,30 +709,57 @@ async function searchRootSpanIdByTraceId(params: {
   fallbackSpanId: string;
 }): Promise<string> {
   const { filters, traceId, invokerTx, fallbackSpanId } = params;
+  const channelCodes = getSelectedChannelCodes(filters);
+
+  const cacheKey = [
+    getCacheScope(filters, invokerTx),
+    traceId,
+    fallbackSpanId,
+  ].join("|");
+
+  const cachedRoot = rootSpanCache.get(cacheKey);
+
+  if (cachedRoot) {
+    return cachedRoot;
+  }
+
+  if (!USE_ROOT_SPAN_LOOKUP) {
+    rootSpanCache.set(cacheKey, fallbackSpanId);
+    return fallbackSpanId;
+  }
 
   const { from, to } = dateRangeToNano(filters.fromDate, filters.toDate);
   const headers = buildAuthHeaders(filters.bearerToken);
 
-  const url = buildRhoSpanSearchUrl({
-    traceId,
-    fromDate: from,
-    toDate: to,
-    site: filters.site,
-  });
+  const search = async (params: {
+    useSiteFilter: boolean;
+    useChannelFilter: boolean;
+    useInvokerTxFilter: boolean;
+  }): Promise<string | null> => {
+    const url = buildRhoSpanSearchUrl({
+      traceId,
+      invokerTx: params.useInvokerTxFilter ? invokerTx : undefined,
+      fromDate: from,
+      toDate: to,
+      site: params.useSiteFilter ? filters.site : undefined,
+      channelCodes: params.useChannelFilter ? channelCodes : [],
+      includeDuration: false,
+    });
 
-  console.log("[RHO root span search URL]", {
-    invokerTx,
-    traceId,
-    fallbackSpanId,
-    url,
-  });
+    console.log("[RHO root span search URL]", {
+      invokerTx: params.useInvokerTxFilter ? invokerTx : undefined,
+      site: params.useSiteFilter ? filters.site : undefined,
+      channelCodes: params.useChannelFilter ? channelCodes : [],
+      traceId,
+      fallbackSpanId,
+      url,
+    });
 
-  try {
     const res = await apiRequest<SpansPaginatedResponse>(url, { headers });
     const items = Array.isArray(res.data) ? (res.data as SpanWithParent[]) : [];
 
     if (!items.length) {
-      return fallbackSpanId;
+      return null;
     }
 
     const root =
@@ -553,24 +774,150 @@ async function searchRootSpanIdByTraceId(params: {
     const rootSpanId = String(root?.spanId ?? "").trim();
 
     console.log("[RHO selected root span]", {
-      invokerTx,
       traceId,
       rootSpanId,
       rootDuration: root ? normalizeDuration(root) : undefined,
       fallbackSpanId,
     });
 
-    return rootSpanId || fallbackSpanId;
-  } catch (error) {
-    console.warn("[RHO] Error buscando root span, usando fallback", {
-      invokerTx,
-      traceId,
-      fallbackSpanId,
-      error,
-    });
+    return rootSpanId || null;
+  };
 
-    return fallbackSpanId;
+  const attempts = [
+    {
+      useSiteFilter: Boolean(filters.site),
+      useChannelFilter: channelCodes.length > 0,
+      useInvokerTxFilter: true,
+    },
+    {
+      useSiteFilter: Boolean(filters.site),
+      useChannelFilter: false,
+      useInvokerTxFilter: true,
+    },
+    {
+      useSiteFilter: false,
+      useChannelFilter: channelCodes.length > 0,
+      useInvokerTxFilter: true,
+    },
+    {
+      useSiteFilter: false,
+      useChannelFilter: false,
+      useInvokerTxFilter: true,
+    },
+    {
+      useSiteFilter: Boolean(filters.site),
+      useChannelFilter: false,
+      useInvokerTxFilter: false,
+    },
+    {
+      useSiteFilter: false,
+      useChannelFilter: false,
+      useInvokerTxFilter: false,
+    },
+  ];
+
+  for (const attempt of attempts) {
+    try {
+      const rootSpanId = await search(attempt);
+
+      if (rootSpanId) {
+        rootSpanCache.set(cacheKey, rootSpanId);
+        return rootSpanId;
+      }
+    } catch (error) {
+      console.warn("[RHO] Error buscando root span, reintentando", {
+        traceId,
+        invokerTx,
+        attempt,
+        error,
+      });
+    }
   }
+
+  rootSpanCache.set(cacheKey, fallbackSpanId);
+  return fallbackSpanId;
+}
+
+async function fetchFullTraceByHintSpan(params: {
+  filters: MetricsFilters;
+  invokerTx: string;
+  hintSpan: RawSpan;
+}): Promise<RawSpan | null> {
+  const { filters, invokerTx, hintSpan } = params;
+
+  const { from, to } = dateRangeToNano(filters.fromDate, filters.toDate);
+  const headers = buildAuthHeaders(filters.bearerToken);
+
+  const traceId = String(hintSpan.traceId ?? "").trim();
+  const hintSpanId = String(hintSpan.spanId ?? "").trim();
+
+  if (!hintSpanId) return null;
+
+  const traceCacheKey = [
+    getCacheScope(filters, invokerTx),
+    traceId || hintSpanId,
+  ].join("|");
+
+  const cachedTrace = traceCache.get(traceCacheKey);
+
+  if (cachedTrace) {
+    return cachedTrace;
+  }
+
+  const rootSpanId = traceId
+    ? await searchRootSpanIdByTraceId({
+        filters,
+        traceId,
+        invokerTx,
+        fallbackSpanId: hintSpanId,
+      })
+    : hintSpanId;
+
+  const url = buildRhoTraceUrl({
+    spanId: rootSpanId,
+    fromDate: from,
+    toDate: to,
+  });
+
+  console.log("[RHO full trace by library span URL]", {
+    invokerTx,
+    site: filters.site,
+    channelCodes: getSelectedChannelCodes(filters),
+    traceId,
+    hintSpanId,
+    rootSpanId,
+    url,
+  });
+
+  const trace = await apiRequest<RawSpan>(url, { headers });
+
+  traceCache.set(traceCacheKey, trace);
+
+  return trace;
+}
+
+function getLimitedUniqueHintSpans(spans: RawSpan[]): RawSpan[] {
+  const uniqueHintSpans: RawSpan[] = [];
+  const seenTraceIds = new Set<string>();
+
+  for (const span of spans) {
+    const traceId = String(span.traceId ?? "").trim();
+    const spanId = String(span.spanId ?? "").trim();
+    const traceKey = traceId || spanId;
+
+    if (!traceKey || seenTraceIds.has(traceKey)) {
+      continue;
+    }
+
+    seenTraceIds.add(traceKey);
+    uniqueHintSpans.push(span);
+
+    if (uniqueHintSpans.length >= MAX_TRACE_IDS_PER_INVOKER) {
+      break;
+    }
+  }
+
+  return uniqueHintSpans;
 }
 
 function getSqlMethod(databaseQuery: string): string {
@@ -580,7 +927,7 @@ function getSqlMethod(databaseQuery: string): string {
 
   const first = q.split(/\s+/)[0].toUpperCase();
 
-  return ["SELECT", "INSERT", "UPDATE", "DELETE"].includes(first)
+  return ["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE"].includes(first)
     ? first
     : "DESCONOCIDO";
 }
@@ -590,6 +937,8 @@ function getMongoOperation(item: TraceEntry): string {
 
   if (source.includes("FIND")) return "FIND";
   if (source.includes("INSERT")) return "INSERT";
+  if (source.includes("UPDATE_MANY")) return "UPDATE_MANY";
+  if (source.includes("UPDATE_ONE")) return "UPDATE_ONE";
   if (source.includes("UPDATE")) return "UPDATE";
   if (source.includes("DELETE")) return "DELETE";
   if (source.includes("AGGREGATE")) return "AGGREGATE";
@@ -673,6 +1022,61 @@ function filterEntriesByChannel(
   return exactMatches.length ? exactMatches : entries;
 }
 
+function dedupeTraceEntries(entries: TraceEntry[]): TraceEntry[] {
+  const seen = new Set<string>();
+  const result: TraceEntry[] = [];
+
+  for (const entry of entries) {
+    const key = [
+      entry.utilitytype,
+      entry.invokerLibrary,
+      entry.invokedparam,
+      entry.databaseInstance,
+      entry.collection,
+      entry.databaseQuery,
+      entry.name,
+      entry.durationMs,
+      entry.channelCode,
+    ].join("|");
+
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    result.push(entry);
+  }
+
+  return result;
+}
+
+function dedupeNormalizedSpans(spans: NormalizedSpan[]): NormalizedSpan[] {
+  const seen = new Set<string>();
+  const result: NormalizedSpan[] = [];
+
+  for (const span of spans) {
+    const key = [
+      span.traceId,
+      span.spanId,
+      span.name,
+      span.utilityType,
+      span.durationMs,
+      span.channelCode,
+      span.properties?.invokerLibrary,
+      span.properties?.invokedparam,
+    ].join("|");
+
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    result.push(span);
+  }
+
+  return result;
+}
+
 function getEntryLibrary(item: TraceEntry): string {
   return String(item.invokerLibrary || item.name || "-").trim();
 }
@@ -685,10 +1089,6 @@ function getEntryInvokedParam(item: TraceEntry): string {
       item.name ||
       ""
   ).trim();
-}
-
-function getEntryLabel(item: TraceEntry): string {
-  return getEntryInvokedParam(item) || getEntryLibrary(item) || "-";
 }
 
 function getEntryDatabaseOrCollection(item: TraceEntry): string {
@@ -754,9 +1154,7 @@ function buildJdbcTreeSection(entries: TraceEntry[], lines: string[]) {
 
   lines.push("JDBC");
 
-  const byLibrary = groupBy(entries, (item) => {
-    return getEntryLibrary(item);
-  });
+  const byLibrary = groupBy(entries, (item) => getEntryLibrary(item));
 
   Object.entries(byLibrary).forEach(([library, libraryEntries]) => {
     const avg = getAverageDuration(libraryEntries);
@@ -796,7 +1194,6 @@ function buildJdbcTreeSection(entries: TraceEntry[], lines: string[]) {
     lines.push("");
   });
 }
-
 
 function buildJpaTreeSection(entries: TraceEntry[], lines: string[]) {
   if (!entries.length) return;
@@ -1077,13 +1474,98 @@ function buildTraceSummary(entries: TraceEntry[], responseTimeMs = 0): string {
   return lines.join("\n").trim();
 }
 
+async function fetchTracesByLibraries(params: {
+  filters: MetricsFilters;
+  invokerTx: string;
+  responseTimeMs?: number;
+  invokerLibraryHint?: string;
+  invokerLibraryHints?: string[];
+}): Promise<RawSpan[]> {
+  const {
+    filters,
+    invokerTx,
+    responseTimeMs,
+    invokerLibraryHint,
+    invokerLibraryHints = [],
+  } = params;
+
+  const cleanHints = Array.from(
+    new Set(
+      [...invokerLibraryHints, invokerLibraryHint]
+        .map((item) => String(item ?? "").trim())
+        .filter(Boolean)
+    )
+  );
+
+  if (!cleanHints.length) {
+    return [];
+  }
+
+  const hintSpans = await searchSpansByLibraries(
+    filters,
+    invokerTx,
+    cleanHints,
+    responseTimeMs
+  );
+
+  const uniqueHintSpans = getLimitedUniqueHintSpans(hintSpans);
+
+  if (!uniqueHintSpans.length) {
+    return [];
+  }
+
+  const traces = await Promise.all(
+    uniqueHintSpans.map((span) =>
+      traceLimiter(() =>
+        fetchFullTraceByHintSpan({
+          filters,
+          invokerTx,
+          hintSpan: span,
+        })
+      )
+    )
+  );
+
+  return traces.filter((trace): trace is RawSpan => Boolean(trace));
+}
+
 export async function fetchSpans(
   filters: MetricsFilters,
   invokerTx: string,
   responseTimeMs?: number,
-  invokerLibraryHint?: string
+  invokerLibraryHint?: string,
+  invokerLibraryHints?: string[]
 ): Promise<NormalizedSpan[]> {
-  const { from, to } = dateRangeToNano(filters.fromDate, filters.toDate);
+  const libraryTraces = await fetchTracesByLibraries({
+    filters,
+    invokerTx,
+    responseTimeMs,
+    invokerLibraryHint,
+    invokerLibraryHints,
+  });
+
+  if (libraryTraces.length > 0) {
+    const normalized = dedupeNormalizedSpans(
+      libraryTraces.flatMap((trace) => normalizeSpans(trace))
+    );
+
+    const channelCodes = getSelectedChannelCodes(filters);
+
+    if (!channelCodes.length) {
+      return normalized;
+    }
+
+    const exactMatches = normalized.filter((span) => {
+      const channelCode =
+        String(span.channelCode ?? "").trim() ||
+        String(span.properties?.["channel-code"] ?? "").trim() ||
+        String(span.properties?.channelCode ?? "").trim();
+
+      return channelCodes.includes(channelCode);
+    });
+
+    return exactMatches.length ? exactMatches : normalized;
+  }
 
   const hintSpan = await searchBestSpan(
     filters,
@@ -1097,40 +1579,17 @@ export async function fetchSpans(
     return [];
   }
 
-  const traceId = String(hintSpan.traceId ?? "").trim();
-  const hintSpanId = String(hintSpan.spanId ?? "").trim();
-
-  const rootSpanId = traceId
-    ? await searchRootSpanIdByTraceId({
-        filters,
-        traceId,
-        invokerTx,
-        fallbackSpanId: hintSpanId,
-      })
-    : hintSpanId;
-
-  const url = buildRhoTraceUrl({
-    spanId: rootSpanId,
-    fromDate: from,
-    toDate: to,
-  });
-
-  console.log("[RHO full trace URL]", {
+  const trace = await fetchFullTraceByHintSpan({
+    filters,
     invokerTx,
-    responseTimeMs,
-    invokerLibraryHint,
-    hintSpanId,
-    traceId,
-    rootSpanId,
-    url,
+    hintSpan,
   });
 
-  const trace = await apiRequest<RawSpan>(url, {
-    headers: buildAuthHeaders(filters.bearerToken),
-  });
+  if (!trace) {
+    return [];
+  }
 
   const normalized = normalizeSpans(trace);
-
   const channelCodes = getSelectedChannelCodes(filters);
 
   if (!channelCodes.length) {
@@ -1153,9 +1612,33 @@ export async function fetchTraceSummaryForInvokerTx(
   filters: MetricsFilters,
   invokerTx: string,
   responseTimeMs?: number,
-  invokerLibraryHint?: string
+  invokerLibraryHint?: string,
+  invokerLibraryHints?: string[]
 ): Promise<string> {
-  const { from, to } = dateRangeToNano(filters.fromDate, filters.toDate);
+  const libraryTraces = await fetchTracesByLibraries({
+    filters,
+    invokerTx,
+    responseTimeMs,
+    invokerLibraryHint,
+    invokerLibraryHints,
+  });
+
+  if (libraryTraces.length > 0) {
+    const entries: TraceEntry[] = [];
+
+    for (const trace of libraryTraces) {
+      collectTraceEntries(trace, entries);
+    }
+
+    const filteredEntries = filterEntriesByChannel(
+      dedupeTraceEntries(entries),
+      getSelectedChannelCodes(filters)
+    );
+
+    if (filteredEntries.length > 0) {
+      return buildTraceSummary(filteredEntries, responseTimeMs);
+    }
+  }
 
   const hintSpan = await searchBestSpan(
     filters,
@@ -1169,44 +1652,22 @@ export async function fetchTraceSummaryForInvokerTx(
     return "Sin trazas encontradas";
   }
 
-  const traceId = String(hintSpan.traceId ?? "").trim();
-  const hintSpanId = String(hintSpan.spanId ?? "").trim();
-
-  const rootSpanId = traceId
-    ? await searchRootSpanIdByTraceId({
-        filters,
-        traceId,
-        invokerTx,
-        fallbackSpanId: hintSpanId,
-      })
-    : hintSpanId;
-
-  const url = buildRhoTraceUrl({
-    spanId: rootSpanId,
-    fromDate: from,
-    toDate: to,
-  });
-
-  console.log("[RHO full trace summary URL]", {
+  const trace = await fetchFullTraceByHintSpan({
+    filters,
     invokerTx,
-    invokerLibraryHint,
-    responseTimeMs,
-    hintSpanId,
-    traceId,
-    rootSpanId,
-    url,
+    hintSpan,
   });
 
-  const trace = await apiRequest<RawSpan>(url, {
-    headers: buildAuthHeaders(filters.bearerToken),
-  });
+  if (!trace) {
+    return "Sin trazas encontradas";
+  }
 
   const entries: TraceEntry[] = [];
 
   collectTraceEntries(trace, entries);
 
   const filteredEntries = filterEntriesByChannel(
-    entries,
+    dedupeTraceEntries(entries),
     getSelectedChannelCodes(filters)
   );
 

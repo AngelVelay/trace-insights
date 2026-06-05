@@ -65,12 +65,17 @@ type InvokedParamItem = {
   maxDuration: number;
 };
 
+type LibraryItem = {
+  invokerLibrary: string;
+  count?: number;
+};
+
 const AWS_CHANNEL_OPTIONS: AwsInformChannelCodeOption[] = CHANNEL_CODES.map(
   (item) => ({
     channelCode: item.channelCode,
     executionsLive02: 0,
     executionsLive04: 0,
-    totalExecutions: item.applications.length,
+    totalExecutions: item.applications?.length ?? 0,
   }),
 );
 
@@ -137,6 +142,16 @@ function parseUtilityTypeItems(value: unknown): UtilityTypeItem[] {
   }
 }
 
+function getInvokerLibrariesFromRow(row?: MetricRow | null): string[] {
+  return Array.from(
+    new Set(
+      parseLibraryItems(row?.invokerLibrary)
+        .map((item) => item.invokerLibrary)
+        .filter(Boolean),
+    ),
+  );
+}
+
 function parseInvokedParamItems(value: unknown): InvokedParamItem[] {
   if (!value || typeof value !== "string" || value === "-") return [];
 
@@ -157,6 +172,35 @@ function parseInvokedParamItems(value: unknown): InvokedParamItem[] {
   } catch {
     return [];
   }
+}
+
+function parseLibraryItems(value: unknown): LibraryItem[] {
+  if (!value || typeof value !== "string" || value === "-") return [];
+
+  try {
+    const parsed = JSON.parse(value);
+
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed
+      .map((item) => ({
+        invokerLibrary: String(item?.invokerLibrary ?? "").trim(),
+        count: Number(item?.count ?? 0),
+      }))
+      .filter((item) => item.invokerLibrary.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+function pickRandomInvokerLibraryFromRow(
+  row?: MetricRow | null,
+): string | undefined {
+  const libraries = parseLibraryItems(row?.invokerLibrary);
+
+  if (!libraries.length) return undefined;
+
+  return libraries[Math.floor(Math.random() * libraries.length)].invokerLibrary;
 }
 
 function emptyClassifiedTraces(): ClassifiedTraces {
@@ -231,11 +275,23 @@ function computeKPIs(
     traceJdbc: classified.Jdbc.length,
     traceMongo: classified.DaasMongoConnector.length,
 
-    traceApiExternalConnectors: classified.APIExternalConnectorImpl.length,
-    traceTitanClient: classified.TitanClient.length,
-    traceGrpcClient: classified.GRPCClient.length,
-    traceJpa: classified.Jpa.length,
-  };
+    traceApiExternalConnectors:
+      "traceApiExternalConnectors" in ({} as KPISummary)
+        ? classified.APIExternalConnectorImpl.length
+        : classified.APIExternalConnectorImpl.length,
+    traceTitanClient:
+      "traceTitanClient" in ({} as KPISummary)
+        ? classified.TitanClient.length
+        : classified.TitanClient.length,
+    traceGrpcClient:
+      "traceGrpcClient" in ({} as KPISummary)
+        ? classified.GRPCClient.length
+        : classified.GRPCClient.length,
+    traceJpa:
+      "traceJpa" in ({} as KPISummary)
+        ? classified.Jpa.length
+        : classified.Jpa.length,
+  } as KPISummary;
 }
 
 function parseInvokerTxList(text: string): string[] {
@@ -311,6 +367,7 @@ export default function Dashboard() {
   const [spans, setSpans] = useState<NormalizedSpan[]>([]);
   const [classified, setClassified] = useState<ClassifiedTraces | null>(null);
   const [metricsError, setMetricsError] = useState<string | null>(null);
+
   const [selectedInvokerTx, setSelectedInvokerTx] = useState<string | null>(
     null,
   );
@@ -356,7 +413,7 @@ export default function Dashboard() {
     traceTitanClient: 0,
     traceGrpcClient: 0,
     traceJpa: 0,
-  });
+  } as KPISummary);
 
   const selectedRows = useMemo(() => {
     if (!selectedInvokerTx) return rows;
@@ -403,24 +460,32 @@ export default function Dashboard() {
 
       const responseTimeMs = getInvokerTxResponseTimeMs(metricRowForTrace);
 
+      const invokerLibraryHints = getInvokerLibrariesFromRow(metricRowForTrace);
+      const invokerLibraryHint = invokerLibraryHints[0];
+
       console.log("[Dashboard trace lookup]", {
         invokerTx,
         channelCode,
         responseTimeMs,
+        invokerLibraryHint,
+        invokerLibraryHints,
         metricRowForTrace,
       });
 
       setProgress(
-        `Obteniendo trazas de ${invokerTx}${channelCode ? ` · canal ${channelCode}` : ""}${
-          responseTimeMs ? ` · TR ${Math.round(responseTimeMs)}ms` : ""
-        }...`,
+        `Obteniendo trazas de ${invokerTx}${
+          channelCode ? ` · canal ${channelCode}` : ""
+        }${responseTimeMs ? ` · TR ${Math.round(responseTimeMs)}ms` : ""}...`,
       );
+
       setProgressValue(70);
 
       const normalizedSpans = await fetchSpans(
         scopedFilters,
         invokerTx,
         responseTimeMs,
+        invokerLibraryHint,
+        invokerLibraryHints,
       );
 
       setSpans(normalizedSpans);
@@ -523,7 +588,9 @@ export default function Dashboard() {
       setSelectedChannelCode(cleanChannel ?? null);
       setLoading(true);
       setProgress(
-        `Cargando detalle de ${invokerTx}${cleanChannel ? ` · canal ${cleanChannel}` : ""}...`,
+        `Cargando detalle de ${invokerTx}${
+          cleanChannel ? ` · canal ${cleanChannel}` : ""
+        }...`,
       );
       setProgressValue(40);
 
@@ -540,6 +607,66 @@ export default function Dashboard() {
     },
     [lastFilters, loadSpansForInvokerTx, rows],
   );
+
+  const handleExportMetricsCsv = () => {
+    if (!rows.length) {
+      toast.error("No hay métricas para exportar.");
+      return;
+    }
+
+    downloadCsvFile(
+      buildAwsMonitoringCsv(rows),
+      `aws_monitoreo_metricas_${Date.now()}.csv`,
+    );
+
+    toast.success("CSV de métricas descargado.");
+  };
+
+  const handleCopyMetricsSheets = async () => {
+    if (!rows.length) {
+      toast.error("No hay métricas para copiar.");
+      return;
+    }
+
+    try {
+      await copyAwsMonitoringToSheets(rows);
+      toast.success(
+        "Tabla completa copiada. Ya puedes pegarla en Google Sheets.",
+      );
+    } catch {
+      toast.error("No se pudo copiar al portapapeles.");
+    }
+  };
+
+  const handleExportChartsCsv = () => {
+    if (!rows.length) {
+      toast.error("No hay datos de gráficas para exportar.");
+      return;
+    }
+
+    downloadCsvFile(
+      buildAwsMonitoringCsv(rows),
+      `aws_monitoreo_graficas_${Date.now()}.csv`,
+    );
+
+    toast.success("CSV de gráficas descargado.");
+  };
+
+  const handleCopyChartsSheets = async () => {
+    if (!rows.length) {
+      toast.error("No hay datos de gráficas para copiar.");
+      return;
+    }
+
+    try {
+      await copyAwsMonitoringToSheets(rows);
+      toast.success(
+        "Datos de gráficas copiados. Ya puedes pegarlos en Google Sheets.",
+      );
+    } catch {
+      toast.error("No se pudo copiar al portapapeles.");
+    }
+  };
 
   const handleAwsInformSearch = useCallback(async () => {
     const invokerTxList = parseInvokerTxList(awsInformInvokerTxInput);
@@ -601,62 +728,6 @@ export default function Dashboard() {
     bearerToken,
   ]);
 
-  const handleExportMetricsCsv = () => {
-    if (!rows.length) {
-      toast.error("No hay métricas para exportar.");
-      return;
-    }
-
-    downloadCsvFile(
-      buildAwsMonitoringCsv(rows),
-      `aws_monitoreo_metricas_${Date.now()}.csv`,
-    );
-    toast.success("CSV de métricas descargado.");
-  };
-
-  const handleCopyMetricsSheets = async () => {
-    if (!rows.length) {
-      toast.error("No hay métricas para copiar.");
-      return;
-    }
-
-    try {
-      await copyAwsMonitoringToSheets(rows);
-      toast.success("Métricas copiadas. Ya puedes pegarlas en Google Sheets.");
-    } catch {
-      toast.error("No se pudo copiar al portapapeles.");
-    }
-  };
-
-  const handleExportChartsCsv = () => {
-    if (!rows.length) {
-      toast.error("No hay datos de gráficas para exportar.");
-      return;
-    }
-
-    downloadCsvFile(
-      buildAwsMonitoringCsv(rows),
-      `aws_monitoreo_graficas_${Date.now()}.csv`,
-    );
-    toast.success("CSV de gráficas descargado.");
-  };
-
-  const handleCopyChartsSheets = async () => {
-    if (!rows.length) {
-      toast.error("No hay datos de gráficas para copiar.");
-      return;
-    }
-
-    try {
-      await copyAwsMonitoringToSheets(rows);
-      toast.success(
-        "Datos de gráficas copiados. Ya puedes pegarlos en Google Sheets.",
-      );
-    } catch {
-      toast.error("No se pudo copiar al portapapeles.");
-    }
-  };
-
   const handleExportAwsInformCsv = (view: "metrics" | "traces") => {
     if (!awsInformResult) {
       toast.error("No hay informe AWS para exportar.");
@@ -667,6 +738,7 @@ export default function Dashboard() {
       buildAwsInformCsv(awsInformResult, view),
       `inform_aws_${view}_${Date.now()}.csv`,
     );
+
     toast.success(`CSV de Inform AWS (${view}) descargado.`);
   };
 
@@ -868,7 +940,7 @@ export default function Dashboard() {
                           value={item.channelCode}
                         >
                           {item.channelCode} ·{" "}
-                          {item.totalExecutions.toLocaleString()} exec
+                          {item.totalExecutions.toLocaleString()} apps
                         </SelectItem>
                       ))}
                     </SelectContent>
