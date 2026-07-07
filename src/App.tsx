@@ -13,6 +13,7 @@ import VersionadoEntornos from "@/pages/VersionadoEntornos";
 import VersionadoIncidentes from "@/pages/VersionadoIncidentes";
 import MonitoreoSecurizacionLive from "@/pages/MonitoreoSecurizacionLive";
 import MonitoreoCicsConsolaOperacionesApx from "@/pages/MonitoreoCicsConsolaOperacionesApx";
+import MonitoreoArbolDependencias from "@/pages/MonitoreoArbolDependencias";
 import Fresno from "@/pages/Fresno";
 import NotFound from "@/pages/NotFound";
 
@@ -72,6 +73,15 @@ function AppShell() {
           element={
             <ProtectedRoute>
               <MonitoreoCicsConsolaOperacionesApx />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/monitoreo/arbol-dependencias"
+          element={
+            <ProtectedRoute>
+              <MonitoreoArbolDependencias />
             </ProtectedRoute>
           }
         />

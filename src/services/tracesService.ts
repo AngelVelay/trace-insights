@@ -1,3 +1,4 @@
+
 import type {
   RawSpan,
   NormalizedSpan,
@@ -16,6 +17,7 @@ const RHO_BASE = "https://rho.live-02.nextgen.igrupobbva";
 const AWS_NETWORK_CONSTANT_MS = 89;
 
 const MAX_TRACE_IDS_PER_INVOKER = 3;
+const MAX_TRACE_IDS_PER_LIBRARY = 1;
 const USE_ROOT_SPAN_LOOKUP = true;
 
 const traceLimiter = createConcurrencyLimiter(3);
@@ -138,8 +140,8 @@ function normalizeDuration(span: RawSpan): number {
   if (typeof span.duration === "number" && span.duration !== null) {
     const d = span.duration;
 
-    if (d > 1_000_000) return d / 1_000_000;
-    if (d > 1_000) return d / 1000;
+    if (d >= 1_000_000) return d / 1_000_000;
+    if (d >= 1_000) return d / 1000;
     if (d < 1) return d * 1000;
 
     return d;
@@ -1580,6 +1582,45 @@ function dedupeTraceEntries(entries: TraceEntry[]): TraceEntry[] {
   return result;
 }
 
+function buildTraceEntriesSignature(entries: TraceEntry[]): string {
+  return entries
+    .map((entry) =>
+      [
+        entry.utilitytype,
+        entry.invokerLibrary,
+        entry.invokedparam,
+        entry.databaseInstance,
+        entry.collection,
+        entry.databaseQuery,
+        entry.name,
+        entry.channelCode,
+      ]
+        .map((value) => String(value ?? "").trim())
+        .join("|")
+    )
+    .sort()
+    .join("||");
+}
+
+function dedupeTraceEntryFlows(flows: TraceEntry[][]): TraceEntry[][] {
+  const seen = new Set<string>();
+  const result: TraceEntry[][] = [];
+
+  for (const entries of flows) {
+    const signature = buildTraceEntriesSignature(entries);
+
+    if (!signature || seen.has(signature)) {
+      continue;
+    }
+
+    seen.add(signature);
+    result.push(entries);
+  }
+
+  return result;
+}
+
+
 function dedupeNormalizedSpans(spans: NormalizedSpan[]): NormalizedSpan[] {
   const seen = new Set<string>();
   const result: NormalizedSpan[] = [];
@@ -1889,32 +1930,54 @@ function buildOtherTreeSection(entries: TraceEntry[], lines: string[]) {
   lines.push("");
 }
 
-function buildTraceSummary(entries: TraceEntry[], responseTimeMs = 0): string {
-  if (!entries.length) return "Sin trazas encontradas";
+type TraceFlowSummary = {
+  label: string;
+  entries: TraceEntry[];
+  totalSaltos: number;
+  tiempoTotalSaltos: number;
+  totalTiempoEsperadoAws: number;
+};
 
-  const totalSaltos = entries.length;
-
-  const tiempoTotalSaltos = entries.reduce(
+function getTraceResponseTime(entries: TraceEntry[]): number {
+  return entries.reduce(
     (sum, item) => sum + Number(item.durationMs ?? 0),
     0
   );
+}
 
-  const tr =
-    Number.isFinite(responseTimeMs) && responseTimeMs > 0
-      ? Number(responseTimeMs)
-      : 0;
+function getExpectedAwsTimeForEntries(entries: TraceEntry[]): number {
+  const totalSaltos = entries.length;
+  const tr = getTraceResponseTime(entries);
 
-  const totalTiempoEsperadoAws =
-    (tr + AWS_NETWORK_CONSTANT_MS) * totalSaltos;
+  return (tr + AWS_NETWORK_CONSTANT_MS) * totalSaltos;
+}
 
-  const lines: string[] = [];
+function buildTraceFlowSummary(
+  entries: TraceEntry[],
+  index: number,
+  responseTimeMs = 0
+): TraceFlowSummary {
+  return {
+    label: `Flujo ${index + 1}`,
+    entries,
+    totalSaltos: entries.length,
+    tiempoTotalSaltos: getTraceResponseTime(entries),
+    totalTiempoEsperadoAws: getExpectedAwsTimeForEntries(entries),
+  };
+}
 
+function appendTraceSummaryHeader(
+  lines: string[],
+  summary: TraceFlowSummary
+): void {
   lines.push("RESUMEN DE SALTOS Y TIEMPOS DE RESPUESTA");
-  lines.push(`Total de saltos encontrados: ${totalSaltos}`);
-  lines.push(`Tiempo total de saltos: ${formatTraceDuration(tiempoTotalSaltos)}`);
+  lines.push(`Total de saltos encontrados: ${summary.totalSaltos}`);
+  lines.push(
+    `Tiempo total de saltos: ${formatTraceDuration(summary.tiempoTotalSaltos)}`
+  );
   lines.push(
     `Total de Tiempo Esperado en AWS: ${formatTraceDuration(
-      totalTiempoEsperadoAws
+      summary.totalTiempoEsperadoAws
     )}`
   );
   lines.push("");
@@ -1922,7 +1985,9 @@ function buildTraceSummary(entries: TraceEntry[], responseTimeMs = 0): string {
   lines.push("");
   lines.push("=== DETALLE DE TRAZAS ===");
   lines.push("");
+}
 
+function appendTraceDetail(entries: TraceEntry[], lines: string[]): void {
   const cicsEntries = entries.filter(
     (entry) => entry.utilitytype === "InterBackendCics"
   );
@@ -2000,6 +2065,104 @@ function buildTraceSummary(entries: TraceEntry[], responseTimeMs = 0): string {
   );
 
   buildOtherTreeSection(otherEntries, lines);
+}
+
+function appendMultiFlowTotals(
+  lines: string[],
+  flowSummaries: TraceFlowSummary[]
+): void {
+  const totalSaltos = flowSummaries.reduce(
+    (sum, flow) => sum + flow.totalSaltos,
+    0
+  );
+
+  const tiempoTotalSaltos = flowSummaries.reduce(
+    (sum, flow) => sum + flow.tiempoTotalSaltos,
+    0
+  );
+
+  const totalTiempoEsperadoAws = flowSummaries.reduce(
+    (sum, flow) => sum + flow.totalTiempoEsperadoAws,
+    0
+  );
+
+  lines.push("============================================================");
+  lines.push("");
+  lines.push(
+    `Total de saltos encontrados: ${totalSaltos} - Suma de saltos de todos los flujos`
+  );
+
+  for (const flow of flowSummaries) {
+    lines.push(`❏ ${flow.label} - ${flow.totalSaltos} saltos`);
+  }
+
+  lines.push("");
+  lines.push(`Tiempo total de saltos: ${formatTraceDuration(tiempoTotalSaltos)}`);
+
+  for (const flow of flowSummaries) {
+    lines.push(`❏ ${flow.label} - ${formatTraceDuration(flow.tiempoTotalSaltos)}`);
+  }
+
+  lines.push("");
+  lines.push(
+    `Total de Tiempo Esperado en AWS: ${formatTraceDuration(
+      totalTiempoEsperadoAws
+    )}`
+  );
+
+  for (const flow of flowSummaries) {
+    lines.push(
+      `❏ ${flow.label} - ${formatTraceDuration(flow.totalTiempoEsperadoAws)}`
+    );
+  }
+}
+
+function buildTraceSummary(entries: TraceEntry[], responseTimeMs = 0): string {
+  if (!entries.length) return "Sin trazas encontradas";
+
+  const summary = buildTraceFlowSummary(entries, 0, responseTimeMs);
+  const lines: string[] = [];
+
+  appendTraceSummaryHeader(lines, summary);
+  appendTraceDetail(entries, lines);
+
+  return lines.join("\n").trim();
+}
+
+function buildTraceSummaryByFlows(
+  flows: TraceEntry[][],
+  responseTimeMs = 0
+): string {
+  const validFlows = flows.filter((entries) => entries.length > 0);
+
+  if (!validFlows.length) return "Sin trazas encontradas";
+
+  if (validFlows.length === 1) {
+    return buildTraceSummary(validFlows[0], responseTimeMs);
+  }
+
+  const flowSummaries = validFlows.map((entries, index) =>
+    buildTraceFlowSummary(entries, index, responseTimeMs)
+  );
+
+  const lines: string[] = [];
+
+  flowSummaries.forEach((flow, index) => {
+    if (index > 0) {
+      lines.push("");
+      lines.push("--------------------------");
+      lines.push("");
+    }
+
+    lines.push(flow.label);
+    lines.push("Traza");
+    lines.push("");
+    appendTraceSummaryHeader(lines, flow);
+    appendTraceDetail(flow.entries, lines);
+  });
+
+  lines.push("");
+  appendMultiFlowTotals(lines, flowSummaries);
 
   return lines.join("\n").trim();
 }
@@ -2031,28 +2194,59 @@ async function fetchTracesByLibraries(params: {
     return [];
   }
 
-  const hintSpans = await searchSpansByLibraries(
-    filters,
-    invokerTx,
-    cleanHints,
-    responseTimeMs
+  const hintSpanGroups = await Promise.all(
+    cleanHints.map(async (libraryHint) => {
+      const spans = await searchSpansByLibraries(
+        filters,
+        invokerTx,
+        [libraryHint],
+        responseTimeMs
+      );
+
+      return getLimitedUniqueHintSpans(spans)
+        .slice(0, MAX_TRACE_IDS_PER_LIBRARY)
+        .map((span) => ({ span, libraryHint }));
+    })
   );
 
-  const uniqueHintSpans = getLimitedUniqueHintSpans(hintSpans);
+  const uniqueHintSpans: { span: RawSpan; libraryHint: string }[] = [];
+  const seenHintSpans = new Set<string>();
+
+  for (const item of hintSpanGroups.flat()) {
+    const traceId = String(item.span.traceId ?? "").trim();
+    const spanId = String(item.span.spanId ?? "").trim();
+    const key = [item.libraryHint, traceId || spanId].join("|");
+
+    if (!key.trim() || seenHintSpans.has(key)) {
+      continue;
+    }
+
+    seenHintSpans.add(key);
+    uniqueHintSpans.push(item);
+  }
 
   if (!uniqueHintSpans.length) {
     return [];
   }
 
   const traces = await Promise.all(
-    uniqueHintSpans.map((span) =>
-      traceLimiter(() =>
-        fetchFullTraceByHintSpan({
+    uniqueHintSpans.map(({ span, libraryHint }) =>
+      traceLimiter(async () => {
+        const trace = await fetchFullTraceByHintSpan({
           filters,
           invokerTx,
           hintSpan: span,
-        })
-      )
+        });
+
+        if (!trace) {
+          return null;
+        }
+
+        return {
+          ...trace,
+          __libraryHint: libraryHint,
+        } as RawSpan;
+      })
     )
   );
 
@@ -2154,19 +2348,23 @@ export async function fetchTraceSummaryForInvokerTx(
   });
 
   if (libraryTraces.length > 0) {
-    const entries: TraceEntry[] = [];
+    const flowEntries = dedupeTraceEntryFlows(
+      libraryTraces
+        .map((trace) => {
+          const entries: TraceEntry[] = [];
 
-    for (const trace of libraryTraces) {
-      collectTraceEntries(trace, entries);
-    }
+          collectTraceEntries(trace, entries);
 
-    const filteredEntries = filterEntriesByChannel(
-      dedupeTraceEntries(entries),
-      getSelectedChannelCodes(filters)
+          return filterEntriesByChannel(
+            dedupeTraceEntries(entries),
+            getSelectedChannelCodes(filters)
+          );
+        })
+        .filter((entries) => entries.length > 0)
     );
 
-    if (filteredEntries.length > 0) {
-      return buildTraceSummary(filteredEntries, responseTimeMs);
+    if (flowEntries.length > 0) {
+      return buildTraceSummaryByFlows(flowEntries, responseTimeMs);
     }
   }
 

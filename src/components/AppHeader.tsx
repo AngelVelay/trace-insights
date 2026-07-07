@@ -19,6 +19,7 @@ type HeaderRoute =
   | "versionado-incidentes"
   | "securizacion-live"
   | "cics-consola-apx"
+  | "arbol-dependencias"
   | "fresno";
 
 const ROUTES: Array<{ value: HeaderRoute; label: string; path: string }> = [
@@ -44,6 +45,11 @@ const ROUTES: Array<{ value: HeaderRoute; label: string; path: string }> = [
     path: "/monitoreo/cics-consola-apx",
   },
   {
+    value: "arbol-dependencias",
+    label: "Monitoreo Árbol de Dependencias",
+    path: "/monitoreo/arbol-dependencias",
+  },
+  {
     value: "fresno",
     label: "Consultar Fresno",
     path: "/fresno",
@@ -53,6 +59,10 @@ const ROUTES: Array<{ value: HeaderRoute; label: string; path: string }> = [
 function getRouteValue(pathname: string): HeaderRoute {
   if (pathname.startsWith("/fresno")) {
     return "fresno";
+  }
+
+  if (pathname.startsWith("/monitoreo/arbol-dependencias")) {
+    return "arbol-dependencias";
   }
 
   if (pathname.startsWith("/monitoreo/cics-consola-apx")) {

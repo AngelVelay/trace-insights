@@ -418,8 +418,13 @@ async function fetchAwsChannelCodeBucketsForSite(
 }
 
 function parseTraceJumps(trace: string): number {
-  const match = String(trace ?? "").match(/Total de saltos encontrados:\s*(\d+)/i);
-  return match ? Number(match[1]) : 0;
+  const matches = [
+    ...String(trace ?? "").matchAll(/Total de saltos encontrados:\s*(\d+)/gi),
+  ];
+
+  const lastMatch = matches[matches.length - 1];
+
+  return lastMatch ? Number(lastMatch[1]) : 0;
 }
 
 function emptyAwsSiteMetrics(

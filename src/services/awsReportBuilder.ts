@@ -117,17 +117,36 @@ function getTotalErrors(meta: InvokerTxMeta | null): number {
   );
 }
 
+function extractLastTraceValue(trace: string, regex: RegExp): string {
+  const matches = [...String(trace ?? "").matchAll(regex)];
+  const lastMatch = matches[matches.length - 1];
+
+  return lastMatch?.[1]?.trim() || "";
+}
+
 function extractTotalJumps(trace: string): number {
-  const match = String(trace ?? "").match(/Total de saltos encontrados:\s*(\d+)/i);
-  return match ? Number(match[1]) : 0;
+  const value = extractLastTraceValue(
+    trace,
+    /Total de saltos encontrados:\s*(\d+)/gi
+  );
+
+  return value ? Number(value) : 0;
+}
+
+function extractTraceJumpTime(trace: string): string {
+  return extractLastTraceValue(
+    trace,
+    /Tiempo total de saltos:\s*([0-9,.]+\s*(?:ms|s)?)/gi
+  );
 }
 
 function extractExpectedAwsTime(trace: string): string {
-  const match = String(trace ?? "").match(
-    /Total de Tiempo Esperado en AWS:\s*([0-9,.]+\s*(?:ms|s)?)/i
+  return (
+    extractLastTraceValue(
+      trace,
+      /Total de Tiempo Esperado en AWS:\s*([0-9,.]+\s*(?:ms|s)?)/gi
+    ) || "-"
   );
-
-  return match?.[1]?.trim() || "-";
 }
 
 function extractSection(trace: string, title: string): string {
@@ -822,8 +841,11 @@ export function buildAwsAnalysisReport(row: MetricRow): string {
     meta?.mean_span_duration ?? row.mean_utility_duration ?? 0
   );
 
+  const traceJumpTime = extractTraceJumpTime(trace);
   const totalErrors = getTotalErrors(meta);
   const expectedAwsTime = extractExpectedAwsTime(trace);
+
+
   const channelName = getChannelName(row.channelCode);
   const communicationSummary = getCommunicationSummary(row, trace);
   const risk = assessAwsRisk(row, trace);
@@ -840,7 +862,8 @@ export function buildAwsAnalysisReport(row: MetricRow): string {
   lines.push("🔵 METRICAS");
   lines.push("");
   lines.push(`❏ ${formatNumber(executions)} exec`);
-  lines.push(`❏ ${formatMs(meanDuration)}`);
+  lines.push(`❏ Tiempo traza: ${traceJumpTime || "0.00ms"}`);
+  lines.push(`❏ Tiempo promedio Atenea: ${formatMs(meanDuration)}`);
   lines.push(`❏ ${formatNumber(totalErrors)} errores`);
   lines.push(`❏ Volumen: ${getVolumeLevel(executions)}`);
   lines.push("");
