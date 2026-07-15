@@ -75,6 +75,24 @@ function toNumber(value: unknown): number | undefined {
   return Number.isFinite(numberValue) ? numberValue : undefined;
 }
 
+function normalizeResponseTimeMs(value: number): number {
+  const absoluteValue = Math.abs(value);
+
+  // Decimal dañado al copiar/interpretar 143.9999534774160 como
+  // 1.439.999.534.774.160. Recupera aproximadamente 144 ms.
+  if (absoluteValue >= 1e12) {
+    return value / 1e13;
+  }
+
+  // span_duration puede llegar en nanosegundos.
+  if (absoluteValue >= 1e6) {
+    return value / 1e6;
+  }
+
+  // Atenea ya puede devolver el promedio directamente en ms.
+  return value;
+}
+
 function getNumericValue(bucket: TechnicalBucket, aliases: string[]): number | undefined {
   const containers: unknown[] = [
     readPath(bucket, ["values"]),
@@ -216,7 +234,7 @@ function buildDailyCells(params: {
     );
 
     const aggregate = weightedTime.get(trx) ?? { sum: 0, weight: 0 };
-    aggregate.sum += responseTime * executions;
+    aggregate.sum += normalizeResponseTimeMs(responseTime) * executions;
     aggregate.weight += executions;
     weightedTime.set(trx, aggregate);
   }

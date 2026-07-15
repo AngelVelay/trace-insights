@@ -78,7 +78,7 @@ function metricLabel(metric: AwsWeeklyMetric): string {
 
 function formatCellValue(metric: AwsWeeklyMetric, value: number): string {
   if (metric === "responseTime") {
-    return `${value.toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ms`;
+    return `${value.toLocaleString("es-MX", { minimumFractionDigits: 0, maximumFractionDigits: 3 })} ms`;
   }
   return value.toLocaleString("es-MX", { maximumFractionDigits: 0 });
 }
