@@ -16,6 +16,7 @@ import MonitoreoCicsConsolaOperacionesApx from "@/pages/MonitoreoCicsConsolaOper
 import MonitoreoArbolDependencias from "@/pages/MonitoreoArbolDependencias";
 import Fresno from "@/pages/Fresno";
 import NotFound from "@/pages/NotFound";
+import AwsReporteSemanal from "@/pages/AwsReporteSemanal";
 
 const queryClient = new QueryClient();
 
@@ -91,6 +92,14 @@ function AppShell() {
           element={
             <ProtectedRoute>
               <Fresno />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/aws/reporte-semanal"
+          element={
+            <ProtectedRoute>
+              <AwsReporteSemanal />
             </ProtectedRoute>
           }
         />

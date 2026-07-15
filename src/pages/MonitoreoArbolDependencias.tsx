@@ -1162,9 +1162,7 @@ export default function MonitoreoArbolDependencias() {
                     <Boxes className="h-5 w-5 text-[#20dad8]" />
                     Árbol de dependencias
                   </CardTitle>
-                  <CardDescription className="mt-1 text-[#d8f7ff]/80">
-                    Visualiza la relación entre transacción, librerías y utilidades. Puedes mover los nodos con el cursor.
-                  </CardDescription>
+                
                 </div>
 
                 <div className="w-full lg:w-[340px]">

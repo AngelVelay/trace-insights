@@ -1304,7 +1304,7 @@ function buildGraphForTransaction(
         id: utilityId,
         name: utility,
         kind: "utility",
-        uuaa: existingUtility ? getNodeUuaa(existingUtility) : "ARCH",
+        uuaa: existingUtility ? getNodeUuaa(existingUtility) : "",
         generated: !existingUtility,
       });
 
@@ -1312,7 +1312,7 @@ function buildGraphForTransaction(
         id: `implementation:${libraryId}:${utilityId}`,
         source: libraryId,
         target: utilityId,
-        label: "usa",
+        label: "",
         type: "IMPLEMENTATION_TO_UTILITY",
       });
     }

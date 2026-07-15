@@ -20,6 +20,7 @@ type HeaderRoute =
   | "securizacion-live"
   | "cics-consola-apx"
   | "arbol-dependencias"
+  | "aws-reporte-semanal"
   | "fresno";
 
 const ROUTES: Array<{ value: HeaderRoute; label: string; path: string }> = [
@@ -54,6 +55,11 @@ const ROUTES: Array<{ value: HeaderRoute; label: string; path: string }> = [
     label: "Consultar Fresno",
     path: "/fresno",
   },
+  {
+    value: "aws-reporte-semanal",
+    label: "AWS Reporte Semanal",
+    path: "/aws/reporte-semanal",
+  },
 ];
 
 function getRouteValue(pathname: string): HeaderRoute {
@@ -81,6 +87,10 @@ function getRouteValue(pathname: string): HeaderRoute {
     return "versionado-entornos";
   }
 
+  if (pathname.startsWith("/aws/reporte-semanal")) {
+    return "aws-reporte-semanal";
+  }
+
   return "pipeline";
 }
 
@@ -105,11 +115,7 @@ export default function AppHeader() {
       <div className="mx-auto flex w-full max-w-[1880px] items-center justify-between gap-6 px-6 py-4">
         <div className="flex items-center gap-4">
           <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-white shadow-sm ring-1 ring-border/50">
-            <img
-              src={apxLogo}
-              alt="APX"
-              className="h-10 w-10 object-contain"
-            />
+            <img src={apxLogo} alt="APX" className="h-10 w-10 object-contain" />
           </div>
 
           <div className="space-y-1">
