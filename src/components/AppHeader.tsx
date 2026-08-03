@@ -21,6 +21,7 @@ type HeaderRoute =
   | "cics-consola-apx"
   | "arbol-dependencias"
   | "aws-reporte-semanal"
+  | "omega-logs"
   | "fresno";
 
 const ROUTES: Array<{ value: HeaderRoute; label: string; path: string }> = [
@@ -60,6 +61,11 @@ const ROUTES: Array<{ value: HeaderRoute; label: string; path: string }> = [
     label: "AWS Reporte Semanal",
     path: "/aws/reporte-semanal",
   },
+  {
+    value: "omega-logs",
+    label: "Recuperar Logs Omega",
+    path: "/monitoreo/logs-omega",
+  },
 ];
 
 function getRouteValue(pathname: string): HeaderRoute {
@@ -89,6 +95,10 @@ function getRouteValue(pathname: string): HeaderRoute {
 
   if (pathname.startsWith("/aws/reporte-semanal")) {
     return "aws-reporte-semanal";
+  }
+
+  if (pathname.startsWith("/monitoreo/logs-omega")) {
+    return "omega-logs";
   }
 
   return "pipeline";

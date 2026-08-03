@@ -2,6 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster as Sonner } from "@/components/ui/sonner";
+import MonitoreoLogsOmega from "@/pages/MonitoreoLogsOmega";
 
 import { AuthProvider, useAuth } from "@/context/AuthContext";
 import ProtectedRoute from "@/components/auth/ProtectedRoute";
@@ -100,6 +101,14 @@ function AppShell() {
           element={
             <ProtectedRoute>
               <AwsReporteSemanal />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/monitoreo/logs-omega"
+          element={
+            <ProtectedRoute>
+              <MonitoreoLogsOmega />
             </ProtectedRoute>
           }
         />

@@ -1,4 +1,3 @@
-
 import type {
   RawSpan,
   NormalizedSpan,
@@ -17,7 +16,6 @@ const RHO_BASE = "https://rho.live-02.nextgen.igrupobbva";
 const AWS_NETWORK_CONSTANT_MS = 89;
 
 const MAX_TRACE_IDS_PER_INVOKER = 3;
-const MAX_TRACE_IDS_PER_LIBRARY = 1;
 const USE_ROOT_SPAN_LOOKUP = true;
 
 const traceLimiter = createConcurrencyLimiter(3);
@@ -35,6 +33,7 @@ export type TraceSpanMetadata = {
 
 type TraceEntry = {
   utilitytype: string;
+  declaredUtilityType: string;
   invokerLibrary: string;
   name: string;
   invokedparam: string;
@@ -43,6 +42,8 @@ type TraceEntry = {
   collection: string;
   durationMs: number;
   channelCode: string;
+  startOrder: number | null;
+  sequence: number;
 };
 
 type SpanWithParent = RawSpan & {
@@ -140,8 +141,8 @@ function normalizeDuration(span: RawSpan): number {
   if (typeof span.duration === "number" && span.duration !== null) {
     const d = span.duration;
 
-    if (d >= 1_000_000) return d / 1_000_000;
-    if (d >= 1_000) return d / 1000;
+    if (d > 1_000_000) return d / 1_000_000;
+    if (d > 1_000) return d / 1000;
     if (d < 1) return d * 1000;
 
     return d;
@@ -156,6 +157,37 @@ function normalizeDuration(span: RawSpan): number {
   }
 
   return 0;
+}
+
+function normalizeSpanStartOrder(span: RawSpan): number | null {
+  const candidates: unknown[] = [
+    span.startDate,
+    span.startTime,
+    span.recordDate,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "number" && Number.isFinite(candidate)) {
+      return candidate;
+    }
+
+    if (typeof candidate === "string" && candidate.trim()) {
+      const trimmed = candidate.trim();
+      const numeric = Number(trimmed);
+
+      if (Number.isFinite(numeric)) {
+        return numeric;
+      }
+
+      const parsed = Date.parse(trimmed);
+
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+
+  return null;
 }
 
 function inferUtilityType(span: RawSpan): string {
@@ -1464,6 +1496,126 @@ function getSqlMethod(databaseQuery: string): string {
     : "DESCONOCIDO";
 }
 
+function sortTraceEntriesByExecutionOrder(entries: TraceEntry[]): TraceEntry[] {
+  return [...entries].sort((a, b) => {
+    const aHasTime = Number.isFinite(a.startOrder);
+    const bHasTime = Number.isFinite(b.startOrder);
+
+    if (aHasTime && bHasTime && a.startOrder !== b.startOrder) {
+      return (a.startOrder ?? 0) - (b.startOrder ?? 0);
+    }
+
+    if (aHasTime !== bHasTime) {
+      return aHasTime ? -1 : 1;
+    }
+
+    return a.sequence - b.sequence;
+  });
+}
+
+function isGrpcEntry(entry: TraceEntry): boolean {
+  const fingerprint = [
+    entry.utilitytype,
+    entry.invokerLibrary,
+    entry.invokedparam,
+    entry.name,
+  ]
+    .map((value) => String(value ?? "").trim().toUpperCase())
+    .join(" ");
+
+  return fingerprint.includes("GRPC");
+}
+
+function isJdbcEntry(entry: TraceEntry): boolean {
+  return String(entry.utilitytype ?? "").trim().toLowerCase() === "jdbc";
+}
+
+const JDBC_WRITE_METHODS = new Set(["INSERT", "UPDATE", "DELETE", "MERGE"]);
+
+/**
+ * Las escrituras JDBC habilitan que los SELECT posteriores del mismo flujo
+ * sean clasificados como salto.
+ */
+const JDBC_SELECT_AFTER_WRITE_METHODS = new Set([
+  "INSERT",
+  "UPDATE",
+  "DELETE",
+  "MERGE",
+]);
+
+const AWS_UTILITY_JUMP_TYPES = new Set([
+  "InterBackendCics",
+  "APIInternalConnectorImpl",
+  "APIExternalConnectorImpl",
+  "Jpa",
+  "DaasMongoConnector",
+  "TitanClient",
+]);
+
+function isAwsUtilityJumpEntry(entry: TraceEntry): boolean {
+  if (isGrpcEntry(entry) || isJdbcEntry(entry)) {
+    return false;
+  }
+
+  const inferredType = String(entry.utilitytype ?? "").trim();
+  return AWS_UTILITY_JUMP_TYPES.has(inferredType);
+}
+
+function getJdbcSqlMethod(entry: TraceEntry): string {
+  const candidates = [entry.databaseQuery, entry.invokedparam, entry.name];
+
+  for (const candidate of candidates) {
+    const method = getSqlMethod(String(candidate ?? ""));
+
+    if (method && method !== "DESCONOCIDO") {
+      return method;
+    }
+  }
+
+  return getSqlMethod(String(entry.databaseQuery ?? "")) || "DESCONOCIDO";
+}
+
+function getTraceEntryJumpFlags(entries: TraceEntry[]): boolean[] {
+  const ordered = sortTraceEntriesByExecutionOrder(entries);
+  const flagsByEntry = new Map<TraceEntry, boolean>();
+
+  let selectMustCountAsJump = false;
+
+  for (const entry of ordered) {
+    if (isGrpcEntry(entry)) {
+      flagsByEntry.set(entry, false);
+      continue;
+    }
+
+    if (!isJdbcEntry(entry)) {
+      const isUtilityJump = isAwsUtilityJumpEntry(entry);
+      flagsByEntry.set(entry, isUtilityJump);
+
+      if (isUtilityJump) {
+        selectMustCountAsJump = true;
+      }
+
+      continue;
+    }
+
+    const method = getJdbcSqlMethod(entry);
+
+    if (method === "SELECT") {
+      flagsByEntry.set(entry, selectMustCountAsJump);
+      continue;
+    }
+
+    const isWriteJump = JDBC_WRITE_METHODS.has(method);
+    flagsByEntry.set(entry, isWriteJump);
+
+    if (JDBC_SELECT_AFTER_WRITE_METHODS.has(method)) {
+      selectMustCountAsJump = true;
+    }
+  }
+
+  return entries.map((entry) => flagsByEntry.get(entry) ?? false);
+}
+
 function getMongoOperation(item: TraceEntry): string {
   const source = `${item.invokedparam} ${item.name}`.toUpperCase();
 
@@ -1479,9 +1631,21 @@ function getMongoOperation(item: TraceEntry): string {
 }
 
 function formatTraceDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) return "0.00ms";
-  if (ms < 1000) return `${ms.toFixed(2)}ms`;
-  return `${(ms / 1000).toFixed(2)}s`;
+  if (!Number.isFinite(ms) || ms <= 0) return "0ms";
+
+  const totalMs = Math.round(ms);
+  const seconds = Math.floor(totalMs / 1000);
+  const restMs = totalMs % 1000;
+
+  if (seconds === 0) {
+    return `${restMs}ms`;
+  }
+
+  if (restMs === 0) {
+    return `${seconds}s`;
+  }
+
+  return `${seconds}s ${restMs}ms`;
 }
 
 function collectTraceEntries(
@@ -1497,6 +1661,7 @@ function collectTraceEntries(
 
   const properties = node.properties ?? {};
   const utilitytype = inferUtilityType(node);
+  const declaredUtilityType = String(properties.utilitytype ?? "").trim();
 
   const invokerLibrary = String(properties.invokerLibrary ?? "").trim();
   const invokedparam = String(properties.invokedparam ?? "").trim();
@@ -1521,6 +1686,7 @@ function collectTraceEntries(
   ) {
     out.push({
       utilitytype,
+      declaredUtilityType,
       invokerLibrary,
       name,
       invokedparam,
@@ -1529,6 +1695,8 @@ function collectTraceEntries(
       collection,
       durationMs,
       channelCode,
+      startOrder: normalizeSpanStartOrder(node),
+      sequence: out.length,
     });
   }
 
@@ -1582,45 +1750,6 @@ function dedupeTraceEntries(entries: TraceEntry[]): TraceEntry[] {
   return result;
 }
 
-function buildTraceEntriesSignature(entries: TraceEntry[]): string {
-  return entries
-    .map((entry) =>
-      [
-        entry.utilitytype,
-        entry.invokerLibrary,
-        entry.invokedparam,
-        entry.databaseInstance,
-        entry.collection,
-        entry.databaseQuery,
-        entry.name,
-        entry.channelCode,
-      ]
-        .map((value) => String(value ?? "").trim())
-        .join("|")
-    )
-    .sort()
-    .join("||");
-}
-
-function dedupeTraceEntryFlows(flows: TraceEntry[][]): TraceEntry[][] {
-  const seen = new Set<string>();
-  const result: TraceEntry[][] = [];
-
-  for (const entries of flows) {
-    const signature = buildTraceEntriesSignature(entries);
-
-    if (!signature || seen.has(signature)) {
-      continue;
-    }
-
-    seen.add(signature);
-    result.push(entries);
-  }
-
-  return result;
-}
-
-
 function dedupeNormalizedSpans(spans: NormalizedSpan[]): NormalizedSpan[] {
   const seen = new Set<string>();
   const result: NormalizedSpan[] = [];
@@ -1668,12 +1797,11 @@ function getEntryDatabaseOrCollection(item: TraceEntry): string {
   ).trim();
 }
 
-function getAverageDuration(entries: TraceEntry[]): number {
+function getTotalDuration(entries: TraceEntry[]): number {
   if (!entries.length) return 0;
 
   return (
-    entries.reduce((sum, item) => sum + Number(item.durationMs ?? 0), 0) /
-    entries.length
+    entries.reduce((sum, item) => sum + Number(item.durationMs ?? 0), 0)
   );
 }
 
@@ -1699,9 +1827,9 @@ function buildCicsTreeSection(entries: TraceEntry[], lines: string[]) {
 
   lines.push("CICS");
 
-  const avg = getAverageDuration(entries);
+  const avg = getTotalDuration(entries);
 
-  lines.push(`└── Tiempo promedio sección: ${formatTraceDuration(avg)}`);
+  lines.push(`└── Tiempo total sección: ${formatTraceDuration(avg)}`);
 
   entries.forEach((item, index) => {
     const isLast = index === entries.length - 1;
@@ -1725,29 +1853,38 @@ function buildJdbcTreeSection(entries: TraceEntry[], lines: string[]) {
 
   lines.push("JDBC");
 
-  const byLibrary = groupBy(entries, (item) => getEntryLibrary(item));
+  const orderedEntries = sortTraceEntriesByExecutionOrder(entries);
+  const jumpFlags = getTraceEntryJumpFlags(orderedEntries);
+  const jumpByEntry = new Map<TraceEntry, boolean>();
+
+  orderedEntries.forEach((entry, index) => {
+    jumpByEntry.set(entry, jumpFlags[index] ?? false);
+  });
+
+  const byLibrary = groupBy(orderedEntries, (item) => getEntryLibrary(item));
 
   Object.entries(byLibrary).forEach(([library, libraryEntries]) => {
-    const avg = getAverageDuration(libraryEntries);
+    const avg = getTotalDuration(libraryEntries);
 
-    lines.push(`└── ${library} (Tiempo promedio: ${formatTraceDuration(avg)})`);
+    lines.push(`└── ${library} (Tiempo total: ${formatTraceDuration(avg)})`);
 
     const byMethod = groupBy(libraryEntries, (item) => {
-      return getSqlMethod(item.databaseQuery) || "DESCONOCIDO";
+      return getJdbcSqlMethod(item) || "DESCONOCIDO";
     });
 
     Object.entries(byMethod).forEach(([method, methodEntries]) => {
-      lines.push(`    ├── ${method}: ${methodEntries.length} saltos`);
+      lines.push(`    ├── ${method}: ${methodEntries.length}`);
 
       methodEntries.forEach((item, index) => {
         const isLast = index === methodEntries.length - 1;
         const branch = isLast ? "    │   └──" : "    │   ├──";
+        const classification = jumpByEntry.get(item) === true ? "Salto" : "Consulta";
 
         const invokedParam = getEntryInvokedParam(item);
         const database = getEntryDatabaseOrCollection(item);
 
         lines.push(
-          `${branch} Jdbc[${invokedParam}] (${formatTraceDuration(
+          `${branch} ${classification} · Jdbc[${invokedParam}] (${formatTraceDuration(
             item.durationMs
           )})`
         );
@@ -1774,9 +1911,9 @@ function buildJpaTreeSection(entries: TraceEntry[], lines: string[]) {
   const byLibrary = groupBy(entries, (item) => getEntryLibrary(item));
 
   Object.entries(byLibrary).forEach(([library, libraryEntries]) => {
-    const avg = getAverageDuration(libraryEntries);
+    const avg = getTotalDuration(libraryEntries);
 
-    lines.push(`└── ${library} (Tiempo promedio: ${formatTraceDuration(avg)})`);
+    lines.push(`└── ${library} (Tiempo total: ${formatTraceDuration(avg)})`);
 
     libraryEntries.forEach((item, index) => {
       const isLast = index === libraryEntries.length - 1;
@@ -1809,9 +1946,9 @@ function buildMongoTreeSection(entries: TraceEntry[], lines: string[]) {
 
   lines.push("MONGO CONNECTOR");
 
-  const avg = getAverageDuration(entries);
+  const avg = getTotalDuration(entries);
 
-  lines.push(`└── Tiempo promedio sección: ${formatTraceDuration(avg)}`);
+  lines.push(`└── Tiempo total sección: ${formatTraceDuration(avg)}`);
 
   entries.forEach((item, index) => {
     const isLast = index === entries.length - 1;
@@ -1839,9 +1976,9 @@ function buildApiConnectorTreeSection(
 
   lines.push(title);
 
-  const avg = getAverageDuration(entries);
+  const avg = getTotalDuration(entries);
 
-  lines.push(`└── Tiempo promedio sección: ${formatTraceDuration(avg)}`);
+  lines.push(`└── Tiempo total sección: ${formatTraceDuration(avg)}`);
 
   entries.forEach((item, index) => {
     const isLast = index === entries.length - 1;
@@ -1877,9 +2014,9 @@ function buildGenericClientTreeSection(
   const byLibrary = groupBy(entries, (item) => getEntryLibrary(item));
 
   Object.entries(byLibrary).forEach(([library, libraryEntries]) => {
-    const avg = getAverageDuration(libraryEntries);
+    const avg = getTotalDuration(libraryEntries);
 
-    lines.push(`└── ${library} (Tiempo promedio: ${formatTraceDuration(avg)})`);
+    lines.push(`└── ${library} (Tiempo total: ${formatTraceDuration(avg)})`);
 
     libraryEntries.forEach((item, index) => {
       const isLast = index === libraryEntries.length - 1;
@@ -1904,9 +2041,9 @@ function buildOtherTreeSection(entries: TraceEntry[], lines: string[]) {
 
   lines.push("OTROS");
 
-  const avg = getAverageDuration(entries);
+  const avg = getTotalDuration(entries);
 
-  lines.push(`└── Tiempo promedio sección: ${formatTraceDuration(avg)}`);
+  lines.push(`└── Tiempo total sección: ${formatTraceDuration(avg)}`);
 
   entries.forEach((item, index) => {
     const isLast = index === entries.length - 1;
@@ -1938,18 +2075,44 @@ type TraceFlowSummary = {
   totalTiempoEsperadoAws: number;
 };
 
-function getTraceResponseTime(entries: TraceEntry[]): number {
-  return entries.reduce(
-    (sum, item) => sum + Number(item.durationMs ?? 0),
-    0
-  );
-}
+type AwsTraceCalculation = {
+  totalSaltos: number;
+  tiempoTotal: number;
+  totalTiempoEsperadoAws: number;
+};
 
 function getExpectedAwsTimeForEntries(entries: TraceEntry[]): number {
-  const totalSaltos = entries.length;
-  const tr = getTraceResponseTime(entries);
+  const metrics = calculateAwsTraceMetrics(entries);
+  return metrics.totalTiempoEsperadoAws;
+}
 
-  return (tr + AWS_NETWORK_CONSTANT_MS) * totalSaltos;
+function calculateAwsTraceMetrics(entries: TraceEntry[]): AwsTraceCalculation {
+  const visibleEntries = sortTraceEntriesByExecutionOrder(
+    entries.filter((entry) => !isGrpcEntry(entry))
+  );
+  const jumpFlags = getTraceEntryJumpFlags(visibleEntries);
+
+  let totalSaltos = 0;
+  let tiempoTotal = 0;
+
+  visibleEntries.forEach((entry, index) => {
+    const durationMs = Number(entry.durationMs ?? 0);
+    const safeDurationMs =
+      Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 0;
+
+    tiempoTotal += safeDurationMs;
+
+    if (jumpFlags[index] === true) {
+      totalSaltos += 1;
+    }
+  });
+
+  return {
+    totalSaltos,
+    tiempoTotal,
+    totalTiempoEsperadoAws:
+      tiempoTotal + AWS_NETWORK_CONSTANT_MS * totalSaltos,
+  };
 }
 
 function buildTraceFlowSummary(
@@ -1957,12 +2120,18 @@ function buildTraceFlowSummary(
   index: number,
   responseTimeMs = 0
 ): TraceFlowSummary {
+  void responseTimeMs;
+
+  const calculation = calculateAwsTraceMetrics(entries);
+
   return {
     label: `Flujo ${index + 1}`,
-    entries,
-    totalSaltos: entries.length,
-    tiempoTotalSaltos: getTraceResponseTime(entries),
-    totalTiempoEsperadoAws: getExpectedAwsTimeForEntries(entries),
+    entries: sortTraceEntriesByExecutionOrder(
+      entries.filter((entry) => !isGrpcEntry(entry))
+    ),
+    totalSaltos: calculation.totalSaltos,
+    tiempoTotalSaltos: calculation.tiempoTotal,
+    totalTiempoEsperadoAws: calculation.totalTiempoEsperadoAws,
   };
 }
 
@@ -1973,7 +2142,7 @@ function appendTraceSummaryHeader(
   lines.push("RESUMEN DE SALTOS Y TIEMPOS DE RESPUESTA");
   lines.push(`Total de saltos encontrados: ${summary.totalSaltos}`);
   lines.push(
-    `Tiempo total de saltos: ${formatTraceDuration(summary.tiempoTotalSaltos)}`
+    `Tiempo total: ${formatTraceDuration(summary.tiempoTotalSaltos)}`
   );
   lines.push(
     `Total de Tiempo Esperado en AWS: ${formatTraceDuration(
@@ -1988,32 +2157,30 @@ function appendTraceSummaryHeader(
 }
 
 function appendTraceDetail(entries: TraceEntry[], lines: string[]): void {
-  const cicsEntries = entries.filter(
+  const visibleEntries = entries.filter((entry) => !isGrpcEntry(entry));
+
+  const cicsEntries = visibleEntries.filter(
     (entry) => entry.utilitytype === "InterBackendCics"
   );
 
-  const jdbcEntries = entries.filter((entry) => entry.utilitytype === "Jdbc");
+  const jdbcEntries = visibleEntries.filter((entry) => entry.utilitytype === "Jdbc");
 
-  const jpaEntries = entries.filter((entry) => entry.utilitytype === "Jpa");
+  const jpaEntries = visibleEntries.filter((entry) => entry.utilitytype === "Jpa");
 
-  const mongoEntries = entries.filter(
+  const mongoEntries = visibleEntries.filter(
     (entry) => entry.utilitytype === "DaasMongoConnector"
   );
 
-  const apiInternalEntries = entries.filter(
+  const apiInternalEntries = visibleEntries.filter(
     (entry) => entry.utilitytype === "APIInternalConnectorImpl"
   );
 
-  const apiExternalEntries = entries.filter(
+  const apiExternalEntries = visibleEntries.filter(
     (entry) => entry.utilitytype === "APIExternalConnectorImpl"
   );
 
-  const titanEntries = entries.filter(
+  const titanEntries = visibleEntries.filter(
     (entry) => entry.utilitytype === "TitanClient"
-  );
-
-  const grpcEntries = entries.filter(
-    (entry) => entry.utilitytype === "GRPCClient"
   );
 
   const knownTypes = new Set([
@@ -2024,10 +2191,9 @@ function appendTraceDetail(entries: TraceEntry[], lines: string[]): void {
     "Jpa",
     "DaasMongoConnector",
     "TitanClient",
-    "GRPCClient",
   ]);
 
-  const otherEntries = entries.filter(
+  const otherEntries = visibleEntries.filter(
     (entry) => !knownTypes.has(entry.utilitytype)
   );
 
@@ -2054,13 +2220,6 @@ function appendTraceDetail(entries: TraceEntry[], lines: string[]): void {
     "TITAN CLIENT",
     "TitanClient",
     titanEntries,
-    lines
-  );
-
-  buildGenericClientTreeSection(
-    "GRPC CLIENT",
-    "GRPCClient",
-    grpcEntries,
     lines
   );
 
@@ -2097,7 +2256,7 @@ function appendMultiFlowTotals(
   }
 
   lines.push("");
-  lines.push(`Tiempo total de saltos: ${formatTraceDuration(tiempoTotalSaltos)}`);
+  lines.push(`Tiempo total: ${formatTraceDuration(tiempoTotalSaltos)}`);
 
   for (const flow of flowSummaries) {
     lines.push(`❏ ${flow.label} - ${formatTraceDuration(flow.tiempoTotalSaltos)}`);
@@ -2118,13 +2277,17 @@ function appendMultiFlowTotals(
 }
 
 function buildTraceSummary(entries: TraceEntry[], responseTimeMs = 0): string {
-  if (!entries.length) return "Sin trazas encontradas";
+  const visibleEntries = sortTraceEntriesByExecutionOrder(
+    entries.filter((entry) => !isGrpcEntry(entry))
+  );
 
-  const summary = buildTraceFlowSummary(entries, 0, responseTimeMs);
+  if (!visibleEntries.length) return "Sin trazas encontradas";
+
+  const summary = buildTraceFlowSummary(visibleEntries, 0, responseTimeMs);
   const lines: string[] = [];
 
   appendTraceSummaryHeader(lines, summary);
-  appendTraceDetail(entries, lines);
+  appendTraceDetail(visibleEntries, lines);
 
   return lines.join("\n").trim();
 }
@@ -2133,7 +2296,13 @@ function buildTraceSummaryByFlows(
   flows: TraceEntry[][],
   responseTimeMs = 0
 ): string {
-  const validFlows = flows.filter((entries) => entries.length > 0);
+  const validFlows = flows
+    .map((entries) =>
+      sortTraceEntriesByExecutionOrder(
+        entries.filter((entry) => !isGrpcEntry(entry))
+      )
+    )
+    .filter((entries) => entries.length > 0);
 
   if (!validFlows.length) return "Sin trazas encontradas";
 
@@ -2194,59 +2363,28 @@ async function fetchTracesByLibraries(params: {
     return [];
   }
 
-  const hintSpanGroups = await Promise.all(
-    cleanHints.map(async (libraryHint) => {
-      const spans = await searchSpansByLibraries(
-        filters,
-        invokerTx,
-        [libraryHint],
-        responseTimeMs
-      );
-
-      return getLimitedUniqueHintSpans(spans)
-        .slice(0, MAX_TRACE_IDS_PER_LIBRARY)
-        .map((span) => ({ span, libraryHint }));
-    })
+  const hintSpans = await searchSpansByLibraries(
+    filters,
+    invokerTx,
+    cleanHints,
+    responseTimeMs
   );
 
-  const uniqueHintSpans: { span: RawSpan; libraryHint: string }[] = [];
-  const seenHintSpans = new Set<string>();
-
-  for (const item of hintSpanGroups.flat()) {
-    const traceId = String(item.span.traceId ?? "").trim();
-    const spanId = String(item.span.spanId ?? "").trim();
-    const key = [item.libraryHint, traceId || spanId].join("|");
-
-    if (!key.trim() || seenHintSpans.has(key)) {
-      continue;
-    }
-
-    seenHintSpans.add(key);
-    uniqueHintSpans.push(item);
-  }
+  const uniqueHintSpans = getLimitedUniqueHintSpans(hintSpans);
 
   if (!uniqueHintSpans.length) {
     return [];
   }
 
   const traces = await Promise.all(
-    uniqueHintSpans.map(({ span, libraryHint }) =>
-      traceLimiter(async () => {
-        const trace = await fetchFullTraceByHintSpan({
+    uniqueHintSpans.map((span) =>
+      traceLimiter(() =>
+        fetchFullTraceByHintSpan({
           filters,
           invokerTx,
           hintSpan: span,
-        });
-
-        if (!trace) {
-          return null;
-        }
-
-        return {
-          ...trace,
-          __libraryHint: libraryHint,
-        } as RawSpan;
-      })
+        })
+      )
     )
   );
 
@@ -2348,20 +2486,17 @@ export async function fetchTraceSummaryForInvokerTx(
   });
 
   if (libraryTraces.length > 0) {
-    const flowEntries = dedupeTraceEntryFlows(
-      libraryTraces
-        .map((trace) => {
-          const entries: TraceEntry[] = [];
+    const flowEntries = libraryTraces
+      .map((trace) => {
+        const entries: TraceEntry[] = [];
+        collectTraceEntries(trace, entries);
 
-          collectTraceEntries(trace, entries);
-
-          return filterEntriesByChannel(
-            dedupeTraceEntries(entries),
-            getSelectedChannelCodes(filters)
-          );
-        })
-        .filter((entries) => entries.length > 0)
-    );
+        return filterEntriesByChannel(
+          dedupeTraceEntries(entries),
+          getSelectedChannelCodes(filters)
+        );
+      })
+      .filter((entries) => entries.length > 0);
 
     if (flowEntries.length > 0) {
       return buildTraceSummaryByFlows(flowEntries, responseTimeMs);

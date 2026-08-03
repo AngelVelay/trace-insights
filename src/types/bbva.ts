@@ -1,5 +1,11 @@
 export type NanoTimestamp = string;
 
+export type WorkEnvironment =
+    | "DEV"
+    | "INT"
+    | "AUS"
+    | "OCTA";
+
 export type SearchMode =
     | "pipeline"
     | "utility"
@@ -131,31 +137,31 @@ export interface ChannelCodeOption {
 }
 
 export interface MetricRow {
-  site: string;
-  channelCode?: string;
-  aap?: string;
-  typology?: string;
-
-  traceChannelCode?: string;
-  traceAap?: string;
-  traceTypology?: string;
-  traceChannels?: Array<{
+    site: string;
     channelCode?: string;
     aap?: string;
     typology?: string;
-    site?: string;
-  }>;
 
-  invokerTx: string;
-  invokerLibrary: string;
-  utilitytype: string;
-  invokedparam: string;
-  trace: string;
+    traceChannelCode?: string;
+    traceAap?: string;
+    traceTypology?: string;
+    traceChannels?: Array<{
+        channelCode?: string;
+        aap?: string;
+        typology?: string;
+        site?: string;
+    }>;
 
-  utility_count: number;
-  min_utility_duration: number;
-  mean_utility_duration: number;
-  max_utility_duration: number;
+    invokerTx: string;
+    invokerLibrary: string;
+    utilitytype: string;
+    invokedparam: string;
+    trace: string;
+
+    utility_count: number;
+    min_utility_duration: number;
+    mean_utility_duration: number;
+    max_utility_duration: number;
 }
 
 
@@ -1560,7 +1566,9 @@ export interface ApiConfig {
 export interface MetricsFilters {
     fromDate: Date;
     toDate: Date;
+
     site?: string;
+    environment?: WorkEnvironment;
 
     invokerTx?: string;
     invokerTxList?: string[];
