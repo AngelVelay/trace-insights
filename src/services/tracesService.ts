@@ -14,11 +14,17 @@ import {
 
 const RHO_BASE = "https://rho.live-02.nextgen.igrupobbva";
 const AWS_NETWORK_CONSTANT_MS = 89;
+const RHO_SEARCH_TIMEOUT_MS = 45000;
+const RHO_TRACE_TIMEOUT_MS = 90000;
 
-const MAX_TRACE_IDS_PER_INVOKER = 3;
+const MAX_TRACE_IDS_PER_INVOKER = 24;
+const TRACE_MATCH_MIN_TOLERANCE_MS = 250;
+const TRACE_MATCH_TOLERANCE_RATIO = 0.20;
+const TRACE_MATCH_MAX_FALLBACK_MS = 10000;
+const TRACE_COMPLETENESS_TOLERANCE_MULTIPLIERS = [1, 2, 4, 8, 16];
 const USE_ROOT_SPAN_LOOKUP = true;
 
-const traceLimiter = createConcurrencyLimiter(3);
+const traceLimiter = createConcurrencyLimiter(2);
 
 const traceCache = new Map<string, RawSpan>();
 const rootSpanCache = new Map<string, string>();
@@ -694,6 +700,7 @@ export async function fetchTraceSpanMetadata(
 
   const response = await apiRequest<RhoSpanDetailResponse>(url, {
     headers: buildAuthHeaders(filters.bearerToken),
+    timeoutMs: RHO_SEARCH_TIMEOUT_MS,
   });
 
   const span = unwrapRhoSpanDetail(response);
@@ -762,6 +769,7 @@ async function searchBestSpan(
     useSiteFilter: boolean;
     useChannelFilter: boolean;
     useDurationFilter: boolean;
+    durationTargetMs?: number;
   }): Promise<RawSpan | null> => {
     const url = buildRhoSpanSearchUrl({
       invokerTx,
@@ -770,8 +778,8 @@ async function searchBestSpan(
       site: params.useSiteFilter ? filters.site : undefined,
       channelCodes: params.useChannelFilter ? channelCodes : [],
       durationMs:
-        params.useDurationFilter && targetDuration !== undefined
-          ? targetDuration
+        params.useDurationFilter && params.durationTargetMs !== undefined
+          ? params.durationTargetMs
           : undefined,
       invokerLibraryHint: params.useLibraryHint
         ? invokerLibraryHint
@@ -786,17 +794,20 @@ async function searchBestSpan(
         ? invokerLibraryHint
         : undefined,
       channelCodes: params.useChannelFilter ? channelCodes : [],
-      targetDuration,
+      targetDuration: params.durationTargetMs ?? targetDuration,
       useDurationFilter: params.useDurationFilter,
       url,
     });
 
-    const res = await apiRequest<SpansPaginatedResponse>(url, { headers });
+    const res = await apiRequest<SpansPaginatedResponse>(url, {
+      headers,
+      timeoutMs: RHO_SEARCH_TIMEOUT_MS,
+    });
     const items = Array.isArray(res.data) ? res.data : [];
 
     const best = sortSpansByDurationTarget(
       validSearchSpans(items),
-      targetDuration
+      params.durationTargetMs ?? targetDuration
     )[0];
 
     if (best) {
@@ -806,7 +817,7 @@ async function searchBestSpan(
         selectedSpanId: best.spanId,
         selectedTraceId: best.traceId,
         selectedDuration: normalizeDuration(best),
-        targetDuration,
+        targetDuration: params.durationTargetMs ?? targetDuration,
       });
     }
 
@@ -870,12 +881,19 @@ const filteredAttempts = strictChannel
   ? attempts.filter((attempt) => attempt.useChannelFilter)
   : attempts;
 
-for (const attempt of filteredAttempts) {
-  const span = await search(attempt);
+const expandedTargets = getExpandedResponseTimeTargets(targetDuration);
 
-  if (span) {
-    return span;
+for (const attempt of filteredAttempts) {
+  if (attempt.useDurationFilter && expandedTargets.length > 0) {
+    for (const durationTargetMs of expandedTargets) {
+      const span = await search({ ...attempt, durationTargetMs });
+      if (span) return span;
+    }
+    continue;
   }
+
+  const span = await search(attempt);
+  if (span) return span;
 }
 
 return null;
@@ -899,107 +917,91 @@ async function searchSpansByLibraries(
     )
   );
 
-  if (!cleanHints.length) {
-    return [];
-  }
+  if (!cleanHints.length) return [];
 
   const targetDuration =
     typeof responseTimeMs === "number" &&
-      Number.isFinite(responseTimeMs) &&
-      responseTimeMs > 0
+    Number.isFinite(responseTimeMs) &&
+    responseTimeMs > 0
       ? Math.round(responseTimeMs)
       : undefined;
+
+  const collected = new Map<string, RawSpan>();
+
+  const appendItems = (items: RawSpan[]) => {
+    for (const span of validSearchSpans(items)) {
+      const key = String(span.traceId ?? span.spanId ?? "").trim();
+      if (key && !collected.has(key)) collected.set(key, span);
+    }
+  };
 
   const search = async (params: {
     useSiteFilter: boolean;
     useChannelFilter: boolean;
-    useDurationFilter: boolean;
-  }): Promise<RawSpan[]> => {
+    durationTargetMs?: number;
+  }): Promise<void> => {
+    const useDurationFilter = params.durationTargetMs !== undefined;
     const url = buildRhoSpanSearchUrl({
       invokerTx,
       fromDate: from,
       toDate: to,
       site: params.useSiteFilter ? filters.site : undefined,
       channelCodes: params.useChannelFilter ? channelCodes : [],
-      durationMs:
-        params.useDurationFilter && targetDuration !== undefined
-          ? targetDuration
-          : undefined,
+      durationMs: params.durationTargetMs,
       invokerLibraryHints: cleanHints,
-      includeDuration: params.useDurationFilter,
+      includeDuration: useDurationFilter,
     });
 
-    console.log("[RHO multi-library span search URL]", {
-      invokerTx,
-      site: params.useSiteFilter ? filters.site : undefined,
-      channelCodes: params.useChannelFilter ? channelCodes : [],
-      invokerLibraryHints: cleanHints,
-      targetDuration,
-      useDurationFilter: params.useDurationFilter,
-      url,
-    });
-
-    const res = await apiRequest<SpansPaginatedResponse>(url, { headers });
-    const items = Array.isArray(res.data) ? res.data : [];
-
-    return sortSpansByDurationTarget(
-      validSearchSpans(items),
-      targetDuration
-    );
+    try {
+      const res = await apiRequest<SpansPaginatedResponse>(url, {
+        headers,
+        timeoutMs: RHO_SEARCH_TIMEOUT_MS,
+      });
+      appendItems(Array.isArray(res.data) ? res.data : []);
+    } catch (error) {
+      console.warn("[RHO] Falló un intento de búsqueda de candidatos", {
+        invokerTx,
+        durationTargetMs: params.durationTargetMs,
+        useSiteFilter: params.useSiteFilter,
+        useChannelFilter: params.useChannelFilter,
+        error,
+      });
+    }
   };
 
-  const attempts = [
-    {
-      useSiteFilter: Boolean(filters.site),
-      useChannelFilter: channelCodes.length > 0,
-      useDurationFilter: targetDuration !== undefined,
-    },
-    {
-      useSiteFilter: Boolean(filters.site),
-      useChannelFilter: channelCodes.length > 0,
-      useDurationFilter: false,
-    },
-    {
-      useSiteFilter: Boolean(filters.site),
-      useChannelFilter: false,
-      useDurationFilter: targetDuration !== undefined,
-    },
-    {
-      useSiteFilter: Boolean(filters.site),
-      useChannelFilter: false,
-      useDurationFilter: false,
-    },
-    {
-      useSiteFilter: false,
-      useChannelFilter: channelCodes.length > 0,
-      useDurationFilter: targetDuration !== undefined,
-    },
-    {
-      useSiteFilter: false,
-      useChannelFilter: channelCodes.length > 0,
-      useDurationFilter: false,
-    },
-    {
-      useSiteFilter: false,
-      useChannelFilter: false,
-      useDurationFilter: targetDuration !== undefined,
-    },
-    {
-      useSiteFilter: false,
-      useChannelFilter: false,
-      useDurationFilter: false,
-    },
-  ];
+  const expandedTargets = getExpandedResponseTimeTargets(targetDuration);
+  const strictChannel = shouldUseStrictChannel(filters);
+  const scopes = strictChannel
+    ? [
+        { useSiteFilter: Boolean(filters.site), useChannelFilter: true },
+        { useSiteFilter: false, useChannelFilter: true },
+        { useSiteFilter: Boolean(filters.site), useChannelFilter: false },
+        { useSiteFilter: false, useChannelFilter: false },
+      ]
+    : [
+        { useSiteFilter: Boolean(filters.site), useChannelFilter: false },
+        { useSiteFilter: false, useChannelFilter: false },
+      ];
 
-  for (const attempt of attempts) {
-    const spans = await search(attempt);
-
-    if (spans.length > 0) {
-      return spans;
+  // Reunimos candidatos de varios rangos. No regresamos en el primer resultado,
+  // porque ese span puede pertenecer a una traza pequeña o incompleta.
+  for (const scope of scopes) {
+    for (const durationTargetMs of expandedTargets) {
+      await search({ ...scope, durationTargetMs });
+      if (collected.size >= MAX_TRACE_IDS_PER_INVOKER) break;
     }
+
+    // La consulta sin duración permite recuperar trazas completas aunque la
+    // medición de invokerTX y la duración almacenada tengan desfase.
+    await search(scope);
+
+    if (collected.size >= MAX_TRACE_IDS_PER_INVOKER) break;
   }
 
-  return [];
+  return sortSpansByDurationTarget(
+    Array.from(collected.values()),
+    targetDuration
+  ).slice(0, MAX_TRACE_IDS_PER_INVOKER);
 }
 
 function getSpanProperty(span: RawSpan | null | undefined, key: string): string {
@@ -1090,6 +1092,7 @@ async function searchTransactionSpanIdByTraceId(params: {
   try {
     const res = await apiRequest<SpansPaginatedResponse>(rawUrl.toString(), {
       headers,
+      timeoutMs: RHO_SEARCH_TIMEOUT_MS,
     });
 
     const items = Array.isArray(res.data) ? res.data : [];
@@ -1191,7 +1194,10 @@ async function searchRootSpanIdByTraceId(params: {
       url,
     });
 
-    const res = await apiRequest<SpansPaginatedResponse>(url, { headers });
+    const res = await apiRequest<SpansPaginatedResponse>(url, {
+      headers,
+      timeoutMs: RHO_SEARCH_TIMEOUT_MS,
+    });
     const items = Array.isArray(res.data) ? (res.data as SpanWithParent[]) : [];
 
     if (!items.length) {
@@ -1214,10 +1220,12 @@ async function searchRootSpanIdByTraceId(params: {
       return hasChannelMetadata(span);
     });
 
+    // Para descargar la traza completa debemos usar el root global real.
+    // El span Transaction de invokerTX puede ser un hijo y devolver solo un subárbol.
     const root =
+      rootLikeSpan ??
       transactionWithChannel ??
       transactionSpan ??
-      rootLikeSpan ??
       spanWithChannel ??
       items.sort((a, b) => normalizeDuration(b) - normalizeDuration(a))[0];
 
@@ -1247,26 +1255,8 @@ async function searchRootSpanIdByTraceId(params: {
   };
 
   const attempts = [
-    {
-      useSiteFilter: Boolean(filters.site),
-      useChannelFilter: channelCodes.length > 0,
-      useInvokerTxFilter: true,
-    },
-    {
-      useSiteFilter: Boolean(filters.site),
-      useChannelFilter: false,
-      useInvokerTxFilter: true,
-    },
-    {
-      useSiteFilter: false,
-      useChannelFilter: channelCodes.length > 0,
-      useInvokerTxFilter: true,
-    },
-    {
-      useSiteFilter: false,
-      useChannelFilter: false,
-      useInvokerTxFilter: true,
-    },
+    // Primero buscamos todos los spans del traceId, sin limitar al invokerTX,
+    // para poder localizar el root global y descargar el árbol completo.
     {
       useSiteFilter: Boolean(filters.site),
       useChannelFilter: false,
@@ -1276,6 +1266,16 @@ async function searchRootSpanIdByTraceId(params: {
       useSiteFilter: false,
       useChannelFilter: false,
       useInvokerTxFilter: false,
+    },
+    {
+      useSiteFilter: Boolean(filters.site),
+      useChannelFilter: channelCodes.length > 0,
+      useInvokerTxFilter: true,
+    },
+    {
+      useSiteFilter: false,
+      useChannelFilter: false,
+      useInvokerTxFilter: true,
     },
   ];
 
@@ -1352,11 +1352,218 @@ async function fetchFullTraceByHintSpan(params: {
     url,
   });
 
-  const trace = await apiRequest<RawSpan>(url, { headers });
+  const trace = await apiRequest<RawSpan>(url, {
+    headers,
+    timeoutMs: RHO_TRACE_TIMEOUT_MS,
+  });
 
   traceCache.set(traceCacheKey, trace);
 
   return trace;
+}
+
+
+function getSpanParentId(span: RawSpan): string {
+  const candidate = span as SpanWithParent;
+  return String(
+    candidate.parentSpanId ?? candidate.parentId ?? candidate.parentSpan ?? ""
+  ).trim();
+}
+
+function spanMatchesInvokerTx(span: RawSpan, invokerTx: string): boolean {
+  const expected = invokerTx.trim().toLowerCase();
+  if (!expected) return false;
+
+  const props = span.properties ?? {};
+  const values = [
+    span.name,
+    props.invokerTx,
+    props.invokertx,
+    props.transaction,
+    props.transactionName,
+    props.operation,
+    props.invokerLibrary,
+  ];
+
+  return values.some((value) => {
+    const normalized = String(value ?? "").trim().toLowerCase();
+    return normalized === expected || normalized.includes(expected);
+  });
+}
+
+/**
+ * Encuentra dentro de la traza completa el span transaccional que representa
+ * a invokerTX. La duración a comparar es la de este span ancla, no la del root
+ * global de la traza ni la suma de utilities hijas.
+ */
+function getTraceDurationMs(trace: RawSpan, invokerTx: string): number {
+  const spans = flattenSpans([trace]);
+  if (!spans.length) return 0;
+
+  const matching = spans.filter((span) => spanMatchesInvokerTx(span, invokerTx));
+  const transactionMatching = matching.filter((span) =>
+    isTransactionSpan(span, invokerTx)
+  );
+  const candidates = transactionMatching.length ? transactionMatching : matching;
+
+  if (!candidates.length) return 0;
+
+  // Cuando hay varios spans del mismo invokerTX, el de mayor duración suele ser
+  // el contenedor transaccional y no una utility hija.
+  return candidates.reduce(
+    (maxDuration, span) => Math.max(maxDuration, normalizeDuration(span)),
+    0
+  );
+}
+
+function getTraceMatchToleranceMs(responseTimeMs: number): number {
+  return Math.max(
+    TRACE_MATCH_MIN_TOLERANCE_MS,
+    Math.round(responseTimeMs * TRACE_MATCH_TOLERANCE_RATIO)
+  );
+}
+
+/**
+ * RHO compara duration por igualdad exacta. Para no perder trazas por pequeñas
+ * diferencias entre invokerTX y el span almacenado, probamos duraciones cada vez
+ * mayores y finalmente hacemos una búsqueda sin filtro de duración.
+ */
+function getExpandedResponseTimeTargets(responseTimeMs?: number): number[] {
+  const target = Number(responseTimeMs);
+  if (!Number.isFinite(target) || target <= 0) return [];
+
+  const base = Math.max(1, Math.round(target));
+  const candidates = [
+    base,
+    base + 25,
+    base + 50,
+    base + 100,
+    base + 250,
+    base + 500,
+    base + 1000,
+    base + 2000,
+    Math.round(base * 1.5),
+    Math.round(base * 2),
+    Math.round(base * 3),
+    Math.round(base * 5),
+    Math.round(base * 10),
+  ];
+
+  return Array.from(new Set(candidates.filter((value) => value > 0))).sort(
+    (a, b) => a - b
+  );
+}
+
+function getTraceCompleteness(trace: RawSpan): {
+  spanCount: number;
+  utilityCount: number;
+  positiveDurationCount: number;
+} {
+  const spans = flattenSpans([trace]);
+  const entries: TraceEntry[] = [];
+  collectTraceEntries(trace, entries);
+  const uniqueEntries = dedupeTraceEntries(entries);
+
+  return {
+    spanCount: spans.length,
+    utilityCount: uniqueEntries.length,
+    positiveDurationCount: uniqueEntries.filter(
+      (entry) => Number(entry.durationMs) > 0
+    ).length,
+  };
+}
+
+function selectConcordantTrace(
+  traces: RawSpan[],
+  invokerTx: string,
+  responseTimeMs?: number
+): RawSpan | null {
+  if (!traces.length) return null;
+
+  const target = Number(responseTimeMs);
+  const ranked = traces
+    .map((trace) => {
+      const traceDurationMs = getTraceDurationMs(trace, invokerTx);
+      const completeness = getTraceCompleteness(trace);
+      return {
+        trace,
+        traceDurationMs,
+        differenceMs:
+          Number.isFinite(target) && target > 0 && traceDurationMs > 0
+            ? Math.abs(traceDurationMs - target)
+            : Number.POSITIVE_INFINITY,
+        ...completeness,
+      };
+    })
+    .filter((candidate) => candidate.spanCount > 0);
+
+  if (!ranked.length) return null;
+
+  const compareCompleteness = (
+    a: (typeof ranked)[number],
+    b: (typeof ranked)[number]
+  ) => {
+    if (a.utilityCount !== b.utilityCount) {
+      return b.utilityCount - a.utilityCount;
+    }
+    if (a.spanCount !== b.spanCount) {
+      return b.spanCount - a.spanCount;
+    }
+    if (a.positiveDurationCount !== b.positiveDurationCount) {
+      return b.positiveDurationCount - a.positiveDurationCount;
+    }
+    return a.differenceMs - b.differenceMs;
+  };
+
+  if (!Number.isFinite(target) || target <= 0) {
+    return [...ranked].sort(compareCompleteness)[0].trace;
+  }
+
+  const baseTolerance = getTraceMatchToleranceMs(target);
+
+  // Ampliamos el tiempo de respuesta por niveles. En el primer nivel que tenga
+  // candidatos, elegimos la traza más completa, no simplemente la más cercana.
+  for (const multiplier of TRACE_COMPLETENESS_TOLERANCE_MULTIPLIERS) {
+    const toleranceMs = Math.min(
+      TRACE_MATCH_MAX_FALLBACK_MS,
+      Math.max(baseTolerance, Math.round(baseTolerance * multiplier))
+    );
+    const candidates = ranked.filter(
+      (candidate) =>
+        candidate.traceDurationMs > 0 &&
+        candidate.differenceMs <= toleranceMs
+    );
+
+    if (candidates.length > 0) {
+      const selected = [...candidates].sort(compareCompleteness)[0];
+      console.log("[RHO selected complete trace]", {
+        invokerTx,
+        responseTimeMs: target,
+        toleranceMs,
+        traceId: String(selected.trace.traceId ?? ""),
+        invokerSpanDurationMs: selected.traceDurationMs,
+        differenceMs: selected.differenceMs,
+        utilityCount: selected.utilityCount,
+        spanCount: selected.spanCount,
+      });
+      return selected.trace;
+    }
+  }
+
+  // Último recurso: elegimos la traza más completa de las recuperadas. Así no
+  // se pierde el detalle por imponer una concordancia temporal imposible.
+  const fallback = [...ranked].sort(compareCompleteness)[0];
+  console.warn("[RHO] Se amplió la tolerancia para conservar la traza más completa", {
+    invokerTx,
+    responseTimeMs: target,
+    traceId: String(fallback.trace.traceId ?? ""),
+    invokerSpanDurationMs: fallback.traceDurationMs,
+    differenceMs: fallback.differenceMs,
+    utilityCount: fallback.utilityCount,
+    spanCount: fallback.spanCount,
+  });
+
+  return fallback.trace;
 }
 
 function getLimitedUniqueHintSpans(spans: RawSpan[]): RawSpan[] {
@@ -1576,44 +1783,19 @@ function getJdbcSqlMethod(entry: TraceEntry): string {
 }
 
 function getTraceEntryJumpFlags(entries: TraceEntry[]): boolean[] {
-  const ordered = sortTraceEntriesByExecutionOrder(entries);
-  const flagsByEntry = new Map<TraceEntry, boolean>();
-
-  let selectMustCountAsJump = false;
-
-  for (const entry of ordered) {
+  return entries.map((entry) => {
     if (isGrpcEntry(entry)) {
-      flagsByEntry.set(entry, false);
-      continue;
+      return false;
     }
 
     if (!isJdbcEntry(entry)) {
-      const isUtilityJump = isAwsUtilityJumpEntry(entry);
-      flagsByEntry.set(entry, isUtilityJump);
-
-      if (isUtilityJump) {
-        selectMustCountAsJump = true;
-      }
-
-      continue;
+      return isAwsUtilityJumpEntry(entry);
     }
 
-    const method = getJdbcSqlMethod(entry);
-
-    if (method === "SELECT") {
-      flagsByEntry.set(entry, selectMustCountAsJump);
-      continue;
-    }
-
-    const isWriteJump = JDBC_WRITE_METHODS.has(method);
-    flagsByEntry.set(entry, isWriteJump);
-
-    if (JDBC_SELECT_AFTER_WRITE_METHODS.has(method)) {
-      selectMustCountAsJump = true;
-    }
-  }
-
-  return entries.map((entry) => flagsByEntry.get(entry) ?? false);
+    // JDBC SELECT es una consulta, no un salto. Solo las escrituras JDBC
+    // se contabilizan como salto para el cálculo esperado en AWS.
+    return JDBC_WRITE_METHODS.has(getJdbcSqlMethod(entry));
+  });
 }
 
 function getMongoOperation(item: TraceEntry): string {
@@ -1726,7 +1908,9 @@ function dedupeTraceEntries(entries: TraceEntry[]): TraceEntry[] {
   const seen = new Set<string>();
   const result: TraceEntry[] = [];
 
-  for (const entry of entries) {
+  for (const entry of sortTraceEntriesByExecutionOrder(entries)) {
+    // La duración no forma parte de la identidad. El mismo span puede llegar
+    // repetido con una duración distinta o redondeada y no debe sumarse otra vez.
     const key = [
       entry.utilitytype,
       entry.invokerLibrary,
@@ -1735,9 +1919,10 @@ function dedupeTraceEntries(entries: TraceEntry[]): TraceEntry[] {
       entry.collection,
       entry.databaseQuery,
       entry.name,
-      entry.durationMs,
       entry.channelCode,
-    ].join("|");
+    ]
+      .map((value) => String(value ?? "").trim().toUpperCase())
+      .join("|");
 
     if (seen.has(key)) {
       continue;
@@ -2086,26 +2271,32 @@ function getExpectedAwsTimeForEntries(entries: TraceEntry[]): number {
   return metrics.totalTiempoEsperadoAws;
 }
 
-function calculateAwsTraceMetrics(entries: TraceEntry[]): AwsTraceCalculation {
-  const visibleEntries = sortTraceEntriesByExecutionOrder(
+function calculateAwsTraceMetrics(
+  entries: TraceEntry[],
+  _responseTimeMs = 0
+): AwsTraceCalculation {
+  const visibleEntries = dedupeTraceEntries(
     entries.filter((entry) => !isGrpcEntry(entry))
   );
   const jumpFlags = getTraceEntryJumpFlags(visibleEntries);
 
-  let totalSaltos = 0;
-  let tiempoTotal = 0;
+  const totalSaltos = jumpFlags.reduce(
+    (total, isJump) => total + (isJump ? 1 : 0),
+    0
+  );
 
-  visibleEntries.forEach((entry, index) => {
-    const durationMs = Number(entry.durationMs ?? 0);
-    const safeDurationMs =
-      Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 0;
+  // El tiempo total del resumen siempre es la suma de las duraciones
+  // mostradas en el detalle de la traza. responseTimeMs de invokerTX se usa
+  // solamente para buscar y ordenar trazas candidatas, nunca para sustituir
+  // esta medicion.
+  const tiempoTotal = visibleEntries.reduce((total, entry) => {
+    const durationMs = Number(entry.durationMs);
 
-    tiempoTotal += safeDurationMs;
-
-    if (jumpFlags[index] === true) {
-      totalSaltos += 1;
-    }
-  });
+    return (
+      total +
+      (Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 0)
+    );
+  }, 0);
 
   return {
     totalSaltos,
@@ -2120,15 +2311,14 @@ function buildTraceFlowSummary(
   index: number,
   responseTimeMs = 0
 ): TraceFlowSummary {
-  void responseTimeMs;
-
-  const calculation = calculateAwsTraceMetrics(entries);
+  const uniqueEntries = dedupeTraceEntries(
+    entries.filter((entry) => !isGrpcEntry(entry))
+  );
+  const calculation = calculateAwsTraceMetrics(uniqueEntries, responseTimeMs);
 
   return {
     label: `Flujo ${index + 1}`,
-    entries: sortTraceEntriesByExecutionOrder(
-      entries.filter((entry) => !isGrpcEntry(entry))
-    ),
+    entries: uniqueEntries,
     totalSaltos: calculation.totalSaltos,
     tiempoTotalSaltos: calculation.tiempoTotal,
     totalTiempoEsperadoAws: calculation.totalTiempoEsperadoAws,
@@ -2139,21 +2329,13 @@ function appendTraceSummaryHeader(
   lines: string[],
   summary: TraceFlowSummary
 ): void {
-  lines.push("RESUMEN DE SALTOS Y TIEMPOS DE RESPUESTA");
   lines.push(`Total de saltos encontrados: ${summary.totalSaltos}`);
-  lines.push(
-    `Tiempo total: ${formatTraceDuration(summary.tiempoTotalSaltos)}`
-  );
+  lines.push(`Tiempo total: ${formatTraceDuration(summary.tiempoTotalSaltos)}`);
   lines.push(
     `Total de Tiempo Esperado en AWS: ${formatTraceDuration(
       summary.totalTiempoEsperadoAws
     )}`
   );
-  lines.push("");
-  lines.push("============================================================");
-  lines.push("");
-  lines.push("=== DETALLE DE TRAZAS ===");
-  lines.push("");
 }
 
 function appendTraceDetail(entries: TraceEntry[], lines: string[]): void {
@@ -2276,8 +2458,22 @@ function appendMultiFlowTotals(
   }
 }
 
+function appendTraceReport(
+  lines: string[],
+  summary: TraceFlowSummary
+): void {
+  lines.push("RESUMEN DE SALTOS Y TIEMPOS DE RESPUESTA");
+  appendTraceSummaryHeader(lines, summary);
+  lines.push("");
+  lines.push("============================================================");
+  lines.push("");
+  lines.push("=== DETALLE DE TRAZAS ===");
+  lines.push("");
+  appendTraceDetail(summary.entries, lines);
+}
+
 function buildTraceSummary(entries: TraceEntry[], responseTimeMs = 0): string {
-  const visibleEntries = sortTraceEntriesByExecutionOrder(
+  const visibleEntries = dedupeTraceEntries(
     entries.filter((entry) => !isGrpcEntry(entry))
   );
 
@@ -2286,8 +2482,7 @@ function buildTraceSummary(entries: TraceEntry[], responseTimeMs = 0): string {
   const summary = buildTraceFlowSummary(visibleEntries, 0, responseTimeMs);
   const lines: string[] = [];
 
-  appendTraceSummaryHeader(lines, summary);
-  appendTraceDetail(visibleEntries, lines);
+  appendTraceReport(lines, summary);
 
   return lines.join("\n").trim();
 }
@@ -2296,42 +2491,18 @@ function buildTraceSummaryByFlows(
   flows: TraceEntry[][],
   responseTimeMs = 0
 ): string {
-  const validFlows = flows
-    .map((entries) =>
-      sortTraceEntriesByExecutionOrder(
-        entries.filter((entry) => !isGrpcEntry(entry))
-      )
-    )
-    .filter((entries) => entries.length > 0);
-
-  if (!validFlows.length) return "Sin trazas encontradas";
-
-  if (validFlows.length === 1) {
-    return buildTraceSummary(validFlows[0], responseTimeMs);
-  }
-
-  const flowSummaries = validFlows.map((entries, index) =>
-    buildTraceFlowSummary(entries, index, responseTimeMs)
+  const uniqueEntries = dedupeTraceEntries(
+    flows
+      .flat()
+      .filter((entry) => !isGrpcEntry(entry))
   );
 
+  if (!uniqueEntries.length) return "Sin trazas encontradas";
+
+  const summary = buildTraceFlowSummary(uniqueEntries, 0, responseTimeMs);
   const lines: string[] = [];
 
-  flowSummaries.forEach((flow, index) => {
-    if (index > 0) {
-      lines.push("");
-      lines.push("--------------------------");
-      lines.push("");
-    }
-
-    lines.push(flow.label);
-    lines.push("Traza");
-    lines.push("");
-    appendTraceSummaryHeader(lines, flow);
-    appendTraceDetail(flow.entries, lines);
-  });
-
-  lines.push("");
-  appendMultiFlowTotals(lines, flowSummaries);
+  appendTraceReport(lines, summary);
 
   return lines.join("\n").trim();
 }
@@ -2388,7 +2559,14 @@ async function fetchTracesByLibraries(params: {
     )
   );
 
-  return traces.filter((trace): trace is RawSpan => Boolean(trace));
+  const validTraces = traces.filter((trace): trace is RawSpan => Boolean(trace));
+  const selectedTrace = selectConcordantTrace(
+    validTraces,
+    invokerTx,
+    responseTimeMs
+  );
+
+  return selectedTrace ? [selectedTrace] : [];
 }
 
 export async function fetchSpans(
@@ -2411,22 +2589,9 @@ export async function fetchSpans(
       libraryTraces.flatMap((trace) => normalizeSpans(trace))
     );
 
-    const channelCodes = getSelectedChannelCodes(filters);
-
-    if (!channelCodes.length) {
-      return normalized;
-    }
-
-    const exactMatches = normalized.filter((span) => {
-      const channelCode =
-        String(span.channelCode ?? "").trim() ||
-        String(span.properties?.["channel-code"] ?? "").trim() ||
-        String(span.properties?.channelCode ?? "").trim();
-
-      return channelCodes.includes(channelCode);
-    });
-
-    return exactMatches.length ? exactMatches : normalized;
+    // El canal se usa para elegir la traza candidata, no para recortar sus hijos.
+    // Muchas utilities JDBC/API/Mongo no traen channel-code propio.
+    return normalized;
   }
 
   const hintSpan = await searchBestSpan(
@@ -2452,22 +2617,10 @@ export async function fetchSpans(
   }
 
   const normalized = normalizeSpans(trace);
-  const channelCodes = getSelectedChannelCodes(filters);
 
-  if (!channelCodes.length) {
-    return normalized;
-  }
-
-  const exactMatches = normalized.filter((span) => {
-    const channelCode =
-      String(span.channelCode ?? "").trim() ||
-      String(span.properties?.["channel-code"] ?? "").trim() ||
-      String(span.properties?.channelCode ?? "").trim();
-
-    return channelCodes.includes(channelCode);
-  });
-
-  return exactMatches.length ? exactMatches : normalized;
+  // No filtrar los spans hijos por channel-code: eso sesga y deja incompleta
+  // la traza porque el canal suele existir únicamente en el span padre.
+  return normalized;
 }
 
 export async function fetchTraceSummaryForInvokerTx(
@@ -2491,15 +2644,21 @@ export async function fetchTraceSummaryForInvokerTx(
         const entries: TraceEntry[] = [];
         collectTraceEntries(trace, entries);
 
-        return filterEntriesByChannel(
-          dedupeTraceEntries(entries),
-          getSelectedChannelCodes(filters)
-        );
+        // La traza ya fue seleccionada usando canal/site. No recortamos
+        // utilities hijas que no tengan channel-code propio.
+        return dedupeTraceEntries(entries);
       })
       .filter((entries) => entries.length > 0);
 
     if (flowEntries.length > 0) {
-      return buildTraceSummaryByFlows(flowEntries, responseTimeMs);
+      const selectedTraceDurationMs = getTraceDurationMs(
+        libraryTraces[0],
+        invokerTx
+      );
+      return buildTraceSummaryByFlows(
+        flowEntries,
+        selectedTraceDurationMs
+      );
     }
   }
 
@@ -2525,14 +2684,29 @@ export async function fetchTraceSummaryForInvokerTx(
     return "Sin trazas encontradas";
   }
 
-  const entries: TraceEntry[] = [];
-
-  collectTraceEntries(trace, entries);
-
-  const filteredEntries = filterEntriesByChannel(
-    dedupeTraceEntries(entries),
-    getSelectedChannelCodes(filters)
+  const concordantTrace = selectConcordantTrace(
+    [trace],
+    invokerTx,
+    responseTimeMs
   );
 
-  return buildTraceSummary(filteredEntries, responseTimeMs);
+  if (!concordantTrace) {
+    console.warn("[RHO] No fue posible medir concordancia; se utilizará la traza recuperada", {
+      invokerTx,
+      responseTimeMs,
+      traceDurationMs: getTraceDurationMs(trace, invokerTx),
+    });
+  }
+
+  const selectedTrace = concordantTrace ?? trace;
+  const entries: TraceEntry[] = [];
+
+  collectTraceEntries(selectedTrace, entries);
+
+  const completeEntries = dedupeTraceEntries(entries);
+
+  return buildTraceSummary(
+    completeEntries,
+    getTraceDurationMs(selectedTrace, invokerTx)
+  );
 }

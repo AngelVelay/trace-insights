@@ -1,3 +1,4 @@
+
 import { GROUPED_CHANNEL_CODES, type MetricRow } from "@/types/bbva";import type {
   AwsInformComparisonResult,
   AwsInformComparisonRow,
@@ -361,25 +362,97 @@ function getMonitoringTableRows(rows: MetricRow[]) {
 }
 
 
-function getJdbcMethodsFromTrace(trace: unknown): string[] {
-  const text = String(trace ?? "");
+const JDBC_READ_METHODS = new Set(["SELECT"]);
+const JDBC_WRITE_METHODS = new Set([
+  "INSERT",
+  "UPDATE",
+  "DELETE",
+  "MERGE",
+]);
+const JDBC_SQL_METHODS = [
+  "SELECT",
+  "INSERT",
+  "UPDATE",
+  "DELETE",
+  "MERGE",
+] as const;
 
-  const jdbcMatch = text.match(
-    /JDBC([\s\S]*?)(?:\n(?:CICS|JPA|MONGO CONNECTOR|API-CONNECTOR INTERNO|API-CONNECTOR EXTERNO|API-CONNECTOR|TITAN CLIENT|GRPC CLIENT|OTROS|🔵)\n|$)/i,
-  );
+function normalizeJdbcMethod(value: unknown): string | null {
+  const text = String(value ?? "")
+    .trim()
+    .replace(/^[\s\-├└│─]+/, "")
+    .toUpperCase();
 
-  const jdbcBlock = jdbcMatch?.[1] ?? "";
+  if (!text) return null;
 
-  if (!jdbcBlock.trim()) {
-    return [];
+  if (text.startsWith("WITH ") || text === "WITH") {
+    return "SELECT";
   }
 
+  return JDBC_SQL_METHODS.find((method) => text.startsWith(method)) ?? null;
+}
+
+function extractJdbcSection(trace: unknown): string {
+  const lines = String(trace ?? "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n");
+
+  const startIndex = lines.findIndex((line) => /^\s*JDBC(?:\s|$)/i.test(line));
+
+  if (startIndex < 0) {
+    return "";
+  }
+
+  const nextSectionPattern = /^\s*(?:CICS|JPA|MONGO CONNECTOR|API-CONNECTOR INTERNO|API-CONNECTOR EXTERNO|API-CONNECTOR|TITAN CLIENT|GRPC CLIENT|OTROS|🔵)(?:\s|$)/i;
+  const jdbcLines: string[] = [];
+
+  for (let index = startIndex; index < lines.length; index += 1) {
+    const line = lines[index];
+
+    if (index > startIndex && nextSectionPattern.test(line)) {
+      break;
+    }
+
+    jdbcLines.push(line);
+  }
+
+  return jdbcLines.join("\n");
+}
+
+function getJdbcMethodsFromTrace(trace: unknown): string[] {
+  const text = String(trace ?? "");
+  const jdbcSection = extractJdbcSection(text);
   const methods = new Set<string>();
 
-  for (const method of ["SELECT", "INSERT", "UPDATE", "DELETE"]) {
-    const regex = new RegExp(`\\b${method}\\s*:\\s*\\d+\\s*saltos`, "i");
+  if (jdbcSection) {
+    for (const method of JDBC_SQL_METHODS) {
+      const counterPattern = new RegExp(
+        `\\b${method}\\s*:\\s*\\d+(?:\\s*saltos)?\\b`,
+        "i",
+      );
 
-    if (regex.test(jdbcBlock)) {
+      if (counterPattern.test(jdbcSection)) {
+        methods.add(method);
+      }
+    }
+
+    for (const line of jdbcSection.split("\n")) {
+      const method = normalizeJdbcMethod(line);
+
+      if (method) {
+        methods.add(method);
+      }
+    }
+  }
+
+  const inlineJdbcPattern = /Jdbc\s*\[([^\]]+)\]/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = inlineJdbcPattern.exec(text)) !== null) {
+    const method = normalizeJdbcMethod(match[1]);
+
+    if (method) {
       methods.add(method);
     }
   }
@@ -387,22 +460,44 @@ function getJdbcMethodsFromTrace(trace: unknown): string[] {
   return Array.from(methods);
 }
 
-function renderJdbcAccessTypeCell(row: MetricRow): string {
-  const methods = getJdbcMethodsFromTrace(row.trace);
+function getJdbcMethodsFromStructuredData(row: MetricRow): string[] {
+  const methods = new Set<string>();
+  const invokedItems = safeJsonParse<InvokedParamItem[]>(row.invokedparam, []);
 
-  if (!methods.length) {
-    return "-";
+  for (const item of invokedItems) {
+    const utilityType = String(item.utilitytype ?? "").trim();
+
+    if (!/^jdbc$/i.test(utilityType)) {
+      continue;
+    }
+
+    const method = normalizeJdbcMethod(item.invokedparam);
+
+    if (method) {
+      methods.add(method);
+    }
   }
 
-  const hasWrite = methods.some((method) =>
-    ["INSERT", "UPDATE", "DELETE"].includes(method),
-  );
+  return Array.from(methods);
+}
 
-  if (hasWrite) {
+function getJdbcMethods(row: MetricRow): string[] {
+  return Array.from(
+    new Set([
+      ...getJdbcMethodsFromTrace(row.trace),
+      ...getJdbcMethodsFromStructuredData(row),
+    ]),
+  );
+}
+
+function renderJdbcAccessTypeCell(row: MetricRow): string {
+  const methods = getJdbcMethods(row);
+
+  if (methods.some((method) => JDBC_WRITE_METHODS.has(method))) {
     return "JDBC [WRITE]";
   }
 
-  if (methods.includes("SELECT")) {
+  if (methods.some((method) => JDBC_READ_METHODS.has(method))) {
     return "JDBC [READ_ONLY]";
   }
 
