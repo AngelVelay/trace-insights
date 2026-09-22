@@ -20,8 +20,8 @@ type HeaderRoute =
   | "securizacion-live"
   | "cics-consola-apx"
   | "arbol-dependencias"
-  | "aws-reporte-semanal"
-  | "omega-logs"
+  | "relacion-canales-work"
+  | "logs-atenea"
   | "fresno";
 
 const ROUTES: Array<{ value: HeaderRoute; label: string; path: string }> = [
@@ -52,55 +52,43 @@ const ROUTES: Array<{ value: HeaderRoute; label: string; path: string }> = [
     path: "/monitoreo/arbol-dependencias",
   },
   {
+    value: "relacion-canales-work",
+    label: "Relación de Canales WORK",
+    path: "/monitoreo/relacion-canales-work",
+  },
+  {
+    value: "logs-atenea",
+    label: "LOGS ATENEA",
+    path: "/monitoreo/logs-atenea",
+  },
+  {
     value: "fresno",
     label: "Consultar Fresno",
     path: "/fresno",
   },
-  {
-    value: "aws-reporte-semanal",
-    label: "AWS Reporte Semanal",
-    path: "/aws/reporte-semanal",
-  },
-  {
-    value: "omega-logs",
-    label: "Recuperar Logs Omega",
-    path: "/monitoreo/logs-omega",
-  },
 ];
 
 function getRouteValue(pathname: string): HeaderRoute {
-  if (pathname.startsWith("/fresno")) {
-    return "fresno";
+  if (pathname.startsWith("/fresno")) return "fresno";
+  if (pathname.startsWith("/monitoreo/logs-atenea")) return "logs-atenea";
+  if (pathname.startsWith("/monitoreo/relacion-canales-work")) {
+    return "relacion-canales-work";
   }
-
   if (pathname.startsWith("/monitoreo/arbol-dependencias")) {
     return "arbol-dependencias";
   }
-
   if (pathname.startsWith("/monitoreo/cics-consola-apx")) {
     return "cics-consola-apx";
   }
-
   if (pathname.startsWith("/monitoreo/securizacion-live")) {
     return "securizacion-live";
   }
-
   if (pathname.startsWith("/versionado/incidentes")) {
     return "versionado-incidentes";
   }
-
   if (pathname.startsWith("/versionado/entornos")) {
     return "versionado-entornos";
   }
-
-  if (pathname.startsWith("/aws/reporte-semanal")) {
-    return "aws-reporte-semanal";
-  }
-
-  if (pathname.startsWith("/monitoreo/logs-omega")) {
-    return "omega-logs";
-  }
-
   return "pipeline";
 }
 
@@ -108,7 +96,6 @@ export default function AppHeader() {
   const navigate = useNavigate();
   const location = useLocation();
   const { user, logout } = useAuth();
-
   const currentValue = getRouteValue(location.pathname);
 
   const handleLogout = async () => {
@@ -127,7 +114,6 @@ export default function AppHeader() {
           <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-white shadow-sm ring-1 ring-border/50">
             <img src={apxLogo} alt="APX" className="h-10 w-10 object-contain" />
           </div>
-
           <div className="space-y-1">
             <div className="flex items-center gap-3">
               <h1 className="text-2xl font-bold tracking-tight text-foreground">
@@ -137,7 +123,6 @@ export default function AppHeader() {
                 Atenea
               </span>
             </div>
-
             <p className="text-sm leading-5 text-muted-foreground" />
           </div>
         </div>
@@ -148,9 +133,7 @@ export default function AppHeader() {
               value={currentValue}
               onValueChange={(value) => {
                 const selected = ROUTES.find((item) => item.value === value);
-                if (selected) {
-                  navigate(selected.path);
-                }
+                if (selected) navigate(selected.path);
               }}
             >
               <SelectTrigger className="h-11 rounded-xl font-mono text-xs">
@@ -169,14 +152,9 @@ export default function AppHeader() {
           {user ? (
             <div className="hidden items-center gap-3 lg:flex">
               <div className="text-right">
-                <div className="text-sm font-semibold text-foreground">
-                  {displayName}
-                </div>
-                <div className="text-xs text-muted-foreground">
-                  {displayEmail}
-                </div>
+                <div className="text-sm font-semibold text-foreground">{displayName}</div>
+                <div className="text-xs text-muted-foreground">{displayEmail}</div>
               </div>
-
               {user.photoUrl ? (
                 <img
                   src={user.photoUrl}
@@ -188,12 +166,7 @@ export default function AppHeader() {
                   {displayInitial}
                 </div>
               )}
-
-              <Button
-                variant="outline"
-                onClick={handleLogout}
-                className="rounded-xl"
-              >
+              <Button variant="outline" onClick={handleLogout} className="rounded-xl">
                 <LogOut className="mr-2 h-4 w-4" />
                 Cerrar sesión
               </Button>
@@ -202,11 +175,7 @@ export default function AppHeader() {
 
           <div className="hidden shrink-0 items-center md:flex">
             <div className="rounded-2xl bg-slate-900 px-4 py-3 shadow-sm ring-1 ring-border/40">
-              <img
-                src={barhcLogo}
-                alt="BArhc"
-                className="h-12 w-auto object-contain"
-              />
+              <img src={barhcLogo} alt="BArhc" className="h-12 w-auto object-contain" />
             </div>
           </div>
         </div>

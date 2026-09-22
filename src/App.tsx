@@ -2,7 +2,6 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster as Sonner } from "@/components/ui/sonner";
-import MonitoreoLogsOmega from "@/pages/MonitoreoLogsOmega";
 
 import { AuthProvider, useAuth } from "@/context/AuthContext";
 import ProtectedRoute from "@/components/auth/ProtectedRoute";
@@ -15,9 +14,10 @@ import VersionadoIncidentes from "@/pages/VersionadoIncidentes";
 import MonitoreoSecurizacionLive from "@/pages/MonitoreoSecurizacionLive";
 import MonitoreoCicsConsolaOperacionesApx from "@/pages/MonitoreoCicsConsolaOperacionesApx";
 import MonitoreoArbolDependencias from "@/pages/MonitoreoArbolDependencias";
+import RelacionCanalesWork from "@/pages/RelacionCanalesWork";
+import LogsAtenea from "@/pages/LogsAtenea";
 import Fresno from "@/pages/Fresno";
 import NotFound from "@/pages/NotFound";
-import AwsReporteSemanal from "@/pages/AwsReporteSemanal";
 
 const queryClient = new QueryClient();
 
@@ -89,26 +89,28 @@ function AppShell() {
         />
 
         <Route
+          path="/monitoreo/relacion-canales-work"
+          element={
+            <ProtectedRoute>
+              <RelacionCanalesWork />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/monitoreo/logs-atenea"
+          element={
+            <ProtectedRoute>
+              <LogsAtenea />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
           path="/fresno"
           element={
             <ProtectedRoute>
               <Fresno />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/aws/reporte-semanal"
-          element={
-            <ProtectedRoute>
-              <AwsReporteSemanal />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/monitoreo/logs-omega"
-          element={
-            <ProtectedRoute>
-              <MonitoreoLogsOmega />
             </ProtectedRoute>
           }
         />

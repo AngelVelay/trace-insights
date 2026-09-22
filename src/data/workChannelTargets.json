@@ -1,0 +1,594 @@
+{
+  "version": 1,
+  "description": "Catalogo fijo de AAP para Relacion de Canales WORK. El channel-code se resuelve contra CHANNEL_CODES/GROUPED_CHANNEL_CODES de src/types/bbva.ts.",
+  "items": [
+    {
+      "aap": "10000200",
+      "name": "Cerberos Connector IB"
+    },
+    {
+      "aap": "10000063",
+      "name": "Claim Center (Maquina)"
+    },
+    {
+      "aap": "10000187",
+      "name": "GloMo lowcost"
+    },
+    {
+      "aap": "10000169",
+      "name": "SalesForce"
+    },
+    {
+      "aap": "10000057",
+      "name": "EECC (Final)"
+    },
+    {
+      "aap": "30000055",
+      "name": "API Channel B2B Autoconsumo Público"
+    },
+    {
+      "aap": "10000066",
+      "name": "Gestor de mensajes"
+    },
+    {
+      "aap": "10000181",
+      "name": "CrediProveedor Privado"
+    },
+    {
+      "aap": "10000220",
+      "name": "API Channel Privado"
+    },
+    {
+      "aap": "10000207",
+      "name": "Senda BNC Privada"
+    },
+    {
+      "aap": "10000152",
+      "name": "BNC Alpha Privado"
+    },
+    {
+      "aap": "10000194",
+      "name": "ECC full Cells (EVA)"
+    },
+    {
+      "aap": "10000186",
+      "name": "Senda MVP Privada"
+    },
+    {
+      "aap": "10000008",
+      "name": "Web Methods (BackEnd)"
+    },
+    {
+      "aap": "10000182",
+      "name": "CrediProveedor Público"
+    },
+    {
+      "aap": "10000045",
+      "name": "Arquitectura de Seguridad"
+    },
+    {
+      "aap": "10000133",
+      "name": "Gema Privado"
+    },
+    {
+      "aap": "10000033",
+      "name": "GloMo"
+    },
+    {
+      "aap": "10000249",
+      "name": "Centra C&IB Full Cells"
+    },
+    {
+      "aap": "10000055",
+      "name": "H2H (Maquina)"
+    },
+    {
+      "aap": "30000009",
+      "name": "CLAN Batch"
+    },
+    {
+      "aap": "10000027",
+      "name": "GCC - Nuevo SAC"
+    },
+    {
+      "aap": "10000056",
+      "name": "AACC (Final)"
+    },
+    {
+      "aap": "10000051",
+      "name": "MSD"
+    },
+    {
+      "aap": "10000003",
+      "name": "APX (BackEnd)"
+    },
+    {
+      "aap": "10000002",
+      "name": "BCom (PyMEs)"
+    },
+    {
+      "aap": "30000016",
+      "name": "ARCE Provenir"
+    },
+    {
+      "aap": "00000000",
+      "name": "BCom (Personas)"
+    },
+    {
+      "aap": "10000164",
+      "name": "Onboarding FX"
+    },
+    {
+      "aap": "10000118",
+      "name": "JBPM (Privado)"
+    },
+    {
+      "aap": "10000048",
+      "name": "MAC RUC"
+    },
+    {
+      "aap": "10000209",
+      "name": "Tableros Cash Management IB"
+    },
+    {
+      "aap": "10000188",
+      "name": "AACC Full Cells Privado"
+    },
+    {
+      "aap": "10000156",
+      "name": "GEMA Corporativo Publico"
+    },
+    {
+      "aap": "10000252",
+      "name": "ORBIT Privado"
+    },
+    {
+      "aap": "10000080",
+      "name": "APIs Empresaria"
+    },
+    {
+      "aap": "10000155",
+      "name": "H2H Sterling Privado"
+    },
+    {
+      "aap": "30000031",
+      "name": "APIC Portal Privado"
+    },
+    {
+      "aap": "10000059",
+      "name": "Max Mistral (Sales Force)"
+    },
+    {
+      "aap": "10000160",
+      "name": "CaS ATMs"
+    },
+    {
+      "aap": "10000147",
+      "name": "Seguros Dinamico Publico"
+    },
+    {
+      "aap": "10000088",
+      "name": "Glomo Enrolamiento"
+    },
+    {
+      "aap": "10000242",
+      "name": "CALYPSO MCVO IB"
+    },
+    {
+      "aap": "10000131",
+      "name": "Bcom Cells Público"
+    },
+    {
+      "aap": "10000044",
+      "name": "Validacion INE (Publico)"
+    },
+    {
+      "aap": "10000137",
+      "name": "Salesforce"
+    },
+    {
+      "aap": "10000011",
+      "name": "BCom (Publico)"
+    },
+    {
+      "aap": "30000105",
+      "name": "Conversational HUB"
+    },
+    {
+      "aap": "10000025",
+      "name": "Cajero Hibrido"
+    },
+    {
+      "aap": "10000036",
+      "name": "SCORD"
+    },
+    {
+      "aap": "10000185",
+      "name": "Estudio Socioeconómico Privado"
+    },
+    {
+      "aap": "10000229",
+      "name": "FDT Cliente Sin Canal Pública"
+    },
+    {
+      "aap": "10000255",
+      "name": "Enroll GEMA SoftToken PyME Privado"
+    },
+    {
+      "aap": "30000057",
+      "name": "API Channel B2B No Autoconsumo Privado"
+    },
+    {
+      "aap": "30000075",
+      "name": "ASOGW IB"
+    },
+    {
+      "aap": "10000072",
+      "name": "BNC"
+    },
+    {
+      "aap": "10000094",
+      "name": "Stand In de Canales"
+    },
+    {
+      "aap": "10000007",
+      "name": "Intranet"
+    },
+    {
+      "aap": "10000163",
+      "name": "Bcom Cells"
+    },
+    {
+      "aap": "10000254",
+      "name": "Enroll GEMA SoftToken Corporativo Privado"
+    },
+    {
+      "aap": "10000176",
+      "name": "LBBVA Público"
+    },
+    {
+      "aap": "10000116",
+      "name": "Multicanal de Seguros MFSA"
+    },
+    {
+      "aap": "10000210",
+      "name": "ASD web cells Público"
+    },
+    {
+      "aap": "10000253",
+      "name": "Audiocodes Core Interbackend"
+    },
+    {
+      "aap": "10000146",
+      "name": "Seguros Dinamico Privado"
+    },
+    {
+      "aap": "10000050",
+      "name": "Gestor de Transmisiones"
+    },
+    {
+      "aap": "10000028",
+      "name": "Portal Extranet"
+    },
+    {
+      "aap": "10000231",
+      "name": "Digital Onboarding Gema noClientes Público"
+    },
+    {
+      "aap": "30000059",
+      "name": "Login B2B2B Privado"
+    },
+    {
+      "aap": "10000223",
+      "name": "Stand In SENDA Pymes Privada"
+    },
+    {
+      "aap": "30000118",
+      "name": "Login Onboarding usuarios Público"
+    },
+    {
+      "aap": "10000236",
+      "name": "eDUA Privado"
+    },
+    {
+      "aap": "10000081",
+      "name": "SICA"
+    },
+    {
+      "aap": "10000191",
+      "name": "Alianzas Partnerships Seguros Público"
+    },
+    {
+      "aap": "10000243",
+      "name": "GloMo enrolment no clientes"
+    },
+    {
+      "aap": "30000042",
+      "name": "Pago y conciliación B2B2B"
+    },
+    {
+      "aap": "10000183",
+      "name": "Genesys Cloud IVR Privado"
+    },
+    {
+      "aap": "10000256",
+      "name": "Contrapartes CIB IB"
+    },
+    {
+      "aap": "30000069",
+      "name": "Logs Arquitectura Privado"
+    },
+    {
+      "aap": "10000250",
+      "name": "Record Keeping Privado"
+    },
+    {
+      "aap": "10000258",
+      "name": "App Asesor Digital Privado"
+    },
+    {
+      "aap": "10000257",
+      "name": "Record Keeping Management Privado"
+    },
+    {
+      "aap": "10000201",
+      "name": "RVTA eGlobal"
+    },
+    {
+      "aap": "10000064",
+      "name": "GPS Ajustadores"
+    },
+    {
+      "aap": "10000000",
+      "name": ""
+    },
+    {
+      "aap": "10000074",
+      "name": "Extranet (No Clientes)"
+    },
+    {
+      "aap": "10000225",
+      "name": "Transformación Backoffice Canales Digitales"
+    },
+    {
+      "aap": "10000199",
+      "name": "Discovery Seguros Privado"
+    },
+    {
+      "aap": "10000110",
+      "name": "Biometrico en Podios"
+    },
+    {
+      "aap": "10000153",
+      "name": "BNC Alpha Privado"
+    },
+    {
+      "aap": "10000070",
+      "name": "H2H HelpDesk"
+    },
+    {
+      "aap": "10000093",
+      "name": "Procredit 2.0"
+    },
+    {
+      "aap": "10000219",
+      "name": "Stand In Gema"
+    },
+    {
+      "aap": "10000142",
+      "name": "Calypso OTC Privado"
+    },
+    {
+      "aap": "10000265",
+      "name": "QA datos siniestro auto Público"
+    },
+    {
+      "aap": "10000211",
+      "name": "Bcom Full Cells F Privado"
+    },
+    {
+      "aap": "10000177",
+      "name": "mPOS SMEs Privado"
+    },
+    {
+      "aap": "10000239",
+      "name": "BNPL Apertura no clientes Pública"
+    },
+    {
+      "aap": "10000095",
+      "name": "ATM"
+    },
+    {
+      "aap": "10000216",
+      "name": "Tracking Hipotecario - Privado"
+    },
+    {
+      "aap": "10000120",
+      "name": "Seguros WEB Publico"
+    },
+    {
+      "aap": "10000017",
+      "name": "Fiduciario (Privado)"
+    },
+    {
+      "aap": "30000079",
+      "name": "Front KCSN Privado"
+    },
+    {
+      "aap": "30000008",
+      "name": "CLAN Online"
+    },
+    {
+      "aap": "10000227",
+      "name": "Digital Activation Gema Privado"
+    },
+    {
+      "aap": "10000121",
+      "name": "Wibe WEB Privado"
+    },
+    {
+      "aap": "10000261",
+      "name": "Blue GenAI Agent Privado"
+    },
+    {
+      "aap": "10000215",
+      "name": "Bcom Cells GloMo Privado"
+    },
+    {
+      "aap": "30000072",
+      "name": "FRM IB"
+    },
+    {
+      "aap": "20000055",
+      "name": "API Channel Global Pivot Connect Público"
+    },
+    {
+      "aap": "10000233",
+      "name": "Contratación Paperless Privado"
+    },
+    {
+      "aap": "10000119",
+      "name": "Seguros WEB Privado"
+    },
+    {
+      "aap": "10000043",
+      "name": "SAP Arrendamiento"
+    },
+    {
+      "aap": "10000259",
+      "name": "Whatsapp & SA Cliente Alto Valor IB"
+    },
+    {
+      "aap": "30000019",
+      "name": "GNC Intraday Web Privado"
+    },
+    {
+      "aap": "10000062",
+      "name": "Auto Alerta (Publico)"
+    },
+    {
+      "aap": "10000173",
+      "name": "GloMo Enrolamiento QR"
+    },
+    {
+      "aap": "10000111",
+      "name": "Promotores Hipotecarios (privado)"
+    },
+    {
+      "aap": "10000240",
+      "name": "Seguros CCM Multiasistencia Full Cells"
+    },
+    {
+      "aap": "10000170",
+      "name": "GAE"
+    },
+    {
+      "aap": "10000206",
+      "name": "Onboarding Transversal DIY Privado"
+    },
+    {
+      "aap": "10000038",
+      "name": "Fiduciario (Maquina)"
+    },
+    {
+      "aap": "10000208",
+      "name": "GCP Privado"
+    },
+    {
+      "aap": "10000054",
+      "name": "H2H (BNC)"
+    },
+    {
+      "aap": "10000224",
+      "name": "Stand In SENDA BNC Privada"
+    },
+    {
+      "aap": "10000180",
+      "name": "Lynx (BackEnd)"
+    },
+    {
+      "aap": "10000077",
+      "name": "Gestion Liquidez"
+    },
+    {
+      "aap": "10000108",
+      "name": "Validacion INE -Notificaciones"
+    },
+    {
+      "aap": "10000041",
+      "name": "GCC - IVR (Publico)"
+    },
+    {
+      "aap": "10000075",
+      "name": "Extranet Publico"
+    },
+    {
+      "aap": "10000263",
+      "name": "Digital Onboarding PYME GEMA Público"
+    },
+    {
+      "aap": "10000037",
+      "name": "API Market"
+    },
+    {
+      "aap": "10000009",
+      "name": ""
+    },
+    {
+      "aap": "10000087",
+      "name": "Shopping AAP publico"
+    },
+    {
+      "aap": "10000235",
+      "name": "Onboarding crediProvedores Anonimo"
+    },
+    {
+      "aap": "30000043",
+      "name": "Open Banking B2B2C Consumo"
+    },
+    {
+      "aap": "10000005",
+      "name": ""
+    },
+    {
+      "aap": "10000179",
+      "name": "Contact Center Público"
+    },
+    {
+      "aap": "10000189",
+      "name": "Onboarding FX Público"
+    },
+    {
+      "aap": "10000018",
+      "name": ""
+    },
+    {
+      "aap": "10000222",
+      "name": "IVR Seguros Autoservicio Privado"
+    },
+    {
+      "aap": "10000267",
+      "name": "Contratación Cuenta Digital N2 Público"
+    },
+    {
+      "aap": "00000033",
+      "name": "GNC Intraday"
+    },
+    {
+      "aap": "10000071",
+      "name": "Comercio Ext BankTrade"
+    },
+    {
+      "aap": "10000238",
+      "name": "ATM Runtime Handler Privado"
+    },
+    {
+      "aap": "10000262",
+      "name": "Digital Onboarding PYME SENDA Público"
+    },
+    {
+      "aap": "30000080",
+      "name": "Tablas Generales y Corporativas"
+    }
+  ]
+}

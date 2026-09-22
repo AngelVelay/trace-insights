@@ -1,9 +1,10 @@
-
-import { GROUPED_CHANNEL_CODES, type MetricRow } from "@/types/bbva";import type {
+import { GROUPED_CHANNEL_CODES, type MetricRow } from "@/types/bbva";
+import type {
   AwsInformComparisonResult,
   AwsInformComparisonRow,
 } from "@/services/metricsService";
 import { buildAwsAnalysisReport } from "@/services/awsReportBuilder";
+import { buildAwsTraceSummary } from "@/services/awsTraceSummary";
 
 type InvokerTxMeta = {
   invokerTx?: string;
@@ -323,6 +324,10 @@ function renderTraceCell(row: MetricRow): string {
   return normalizeMultilineText(row.trace || "-");
 }
 
+function renderTraceSummaryCell(row: MetricRow): string {
+  return buildAwsTraceSummary(row);
+}
+
 function renderInformeAwsCell(row: MetricRow): string {
   return buildAwsAnalysisReport(row);
 }
@@ -339,6 +344,7 @@ const AWS_MONITORING_TABLE_HEADERS = [
   "JDBC Tipo",
   "InvokedParam",
   "Trace",
+  "Resumen Trazas AWS",
   "Informe AWS",
 ];
 
@@ -356,148 +362,52 @@ function getMonitoringTableRows(rows: MetricRow[]) {
       renderJdbcAccessTypeCell(row),
       renderInvokedParamCell(row),
       renderTraceCell(row),
+      renderTraceSummaryCell(row),
       renderInformeAwsCell(row),
     ];
   });
 }
 
 
-const JDBC_READ_METHODS = new Set(["SELECT"]);
-const JDBC_WRITE_METHODS = new Set([
-  "INSERT",
-  "UPDATE",
-  "DELETE",
-  "MERGE",
-]);
-const JDBC_SQL_METHODS = [
-  "SELECT",
-  "INSERT",
-  "UPDATE",
-  "DELETE",
-  "MERGE",
-] as const;
-
-function normalizeJdbcMethod(value: unknown): string | null {
-  const text = String(value ?? "")
-    .trim()
-    .replace(/^[\s\-├└│─]+/, "")
-    .toUpperCase();
-
-  if (!text) return null;
-
-  if (text.startsWith("WITH ") || text === "WITH") {
-    return "SELECT";
-  }
-
-  return JDBC_SQL_METHODS.find((method) => text.startsWith(method)) ?? null;
-}
-
-function extractJdbcSection(trace: unknown): string {
-  const lines = String(trace ?? "")
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    .split("\n");
-
-  const startIndex = lines.findIndex((line) => /^\s*JDBC(?:\s|$)/i.test(line));
-
-  if (startIndex < 0) {
-    return "";
-  }
-
-  const nextSectionPattern = /^\s*(?:CICS|JPA|MONGO CONNECTOR|API-CONNECTOR INTERNO|API-CONNECTOR EXTERNO|API-CONNECTOR|TITAN CLIENT|GRPC CLIENT|OTROS|🔵)(?:\s|$)/i;
-  const jdbcLines: string[] = [];
-
-  for (let index = startIndex; index < lines.length; index += 1) {
-    const line = lines[index];
-
-    if (index > startIndex && nextSectionPattern.test(line)) {
-      break;
-    }
-
-    jdbcLines.push(line);
-  }
-
-  return jdbcLines.join("\n");
-}
-
 function getJdbcMethodsFromTrace(trace: unknown): string[] {
   const text = String(trace ?? "");
-  const jdbcSection = extractJdbcSection(text);
   const methods = new Set<string>();
 
-  if (jdbcSection) {
-    for (const method of JDBC_SQL_METHODS) {
-      const counterPattern = new RegExp(
-        `\\b${method}\\s*:\\s*\\d+(?:\\s*saltos)?\\b`,
-        "i",
-      );
+  for (const method of ["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE"]) {
+    const regex = new RegExp(`\\b${method}\\s*:\\s*\\d+`, "i");
 
-      if (counterPattern.test(jdbcSection)) {
-        methods.add(method);
-      }
-    }
-
-    for (const line of jdbcSection.split("\n")) {
-      const method = normalizeJdbcMethod(line);
-
-      if (method) {
-        methods.add(method);
-      }
-    }
-  }
-
-  const inlineJdbcPattern = /Jdbc\s*\[([^\]]+)\]/gi;
-  let match: RegExpExecArray | null;
-
-  while ((match = inlineJdbcPattern.exec(text)) !== null) {
-    const method = normalizeJdbcMethod(match[1]);
-
-    if (method) {
+    if (regex.test(text)) {
       methods.add(method);
     }
   }
 
-  return Array.from(methods);
-}
+  if (/Consulta\s*·\s*Jdbc\[/i.test(text)) {
+    methods.add("SELECT");
+  }
 
-function getJdbcMethodsFromStructuredData(row: MetricRow): string[] {
-  const methods = new Set<string>();
-  const invokedItems = safeJsonParse<InvokedParamItem[]>(row.invokedparam, []);
-
-  for (const item of invokedItems) {
-    const utilityType = String(item.utilitytype ?? "").trim();
-
-    if (!/^jdbc$/i.test(utilityType)) {
-      continue;
-    }
-
-    const method = normalizeJdbcMethod(item.invokedparam);
-
-    if (method) {
-      methods.add(method);
-    }
+  if (/Salto\s*·\s*Jdbc\[/i.test(text)) {
+    methods.add("WRITE");
   }
 
   return Array.from(methods);
-}
-
-function getJdbcMethods(row: MetricRow): string[] {
-  return Array.from(
-    new Set([
-      ...getJdbcMethodsFromTrace(row.trace),
-      ...getJdbcMethodsFromStructuredData(row),
-    ]),
-  );
 }
 
 function renderJdbcAccessTypeCell(row: MetricRow): string {
-  const methods = getJdbcMethods(row);
+  const methods = getJdbcMethodsFromTrace(row.trace);
 
-  if (methods.some((method) => JDBC_WRITE_METHODS.has(method))) {
+  if (!methods.length) {
+    return "-";
+  }
+
+  const hasWrite = methods.some((method) =>
+    ["INSERT", "UPDATE", "DELETE", "MERGE", "WRITE"].includes(method),
+  );
+
+  if (hasWrite) {
     return "JDBC [WRITE]";
   }
 
-  if (methods.some((method) => JDBC_READ_METHODS.has(method))) {
+  if (methods.includes("SELECT")) {
     return "JDBC [READ_ONLY]";
   }
 

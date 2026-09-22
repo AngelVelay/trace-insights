@@ -136,7 +136,7 @@ function extractTotalJumps(trace: string): number {
 function extractTraceJumpTime(trace: string): string {
   return extractLastTraceValue(
     trace,
-    /Tiempo total de saltos:\s*([0-9,.]+\s*(?:ms|s)?)/gi
+    /Tiempo total(?: de saltos)?:\s*([^\r\n]+)/gi
   );
 }
 
@@ -144,7 +144,7 @@ function extractExpectedAwsTime(trace: string): string {
   return (
     extractLastTraceValue(
       trace,
-      /Total de Tiempo Esperado en AWS:\s*([0-9,.]+\s*(?:ms|s)?)/gi
+      /Total de Tiempo Esperado en AWS:\s*([^\r\n]+)/gi
     ) || "-"
   );
 }
@@ -186,7 +186,7 @@ function extractJdbcMethods(trace: string): string[] {
   const methods = new Set<string>();
 
   for (const method of ["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE"]) {
-    const regex = new RegExp(`\\b${method}\\s*:\\s*\\d+\\s*saltos`, "i");
+    const regex = new RegExp(`\\b${method}\\s*:\\s*\\d+`, "i");
 
     if (regex.test(block)) {
       methods.add(method);
@@ -528,7 +528,7 @@ function buildModifierJdbcSection(trace: string): string[] {
 
   for (const method of modifierMethods) {
     const regex = new RegExp(
-      `(?:└──|├──)\\s*([^\\n]+?)\\s*\\(Tiempo promedio:[\\s\\S]*?${method}:\\s*(\\d+)\\s*saltos`,
+      `(?:└──|├──)\\s*([^\\n]+?)\\s*\\(Tiempo (?:total|promedio):[\\s\\S]*?${method}:\\s*(\\d+)`,
       "gi"
     );
 
@@ -546,7 +546,7 @@ function buildModifierJdbcSection(trace: string): string[] {
 
     if (!found) {
       const fallback = trace.match(
-        new RegExp(`${method}:\\s*(\\d+)\\s*saltos`, "i")
+        new RegExp(`${method}:\\s*(\\d+)`, "i")
       );
       const count = Number(fallback?.[1] ?? 1);
 

@@ -2,6 +2,7 @@ import { Copy } from "lucide-react";
 import { toast } from "sonner";
 import { GROUPED_CHANNEL_CODES, type MetricRow } from "@/types/bbva";
 import { buildAwsAnalysisReport } from "@/services/awsReportBuilder";
+import { buildAwsTraceSummary } from "@/services/awsTraceSummary";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -358,151 +359,48 @@ function buildUtilitySummary(row: MetricRow): string {
   return Array.from(result).join(", ") || "-";
 }
 
-const JDBC_READ_METHODS = new Set(["SELECT"]);
-const JDBC_WRITE_METHODS = new Set(["INSERT", "UPDATE", "DELETE", "MERGE"]);
-const JDBC_SQL_METHODS = new Set([
-  ...JDBC_READ_METHODS,
-  ...JDBC_WRITE_METHODS,
-]);
-
-function normalizeJdbcMethod(value: unknown): string | null {
-  const clean = String(value ?? "").trim().toUpperCase();
-
-  if (!clean) {
-    return null;
-  }
-
-  if (clean === "WITH" || clean.startsWith("WITH ")) {
-    return "SELECT";
-  }
-
-  const firstToken = clean.match(/^[A-Z]+/)?.[0] ?? "";
-
-  return JDBC_SQL_METHODS.has(firstToken) ? firstToken : null;
-}
-
-function extractJdbcSection(trace: unknown): string {
-  const lines = String(trace ?? "").split(/\r?\n/);
-  const jdbcLines: string[] = [];
-  let insideJdbc = false;
-
-  const sectionHeaders = new Set([
-    "CICS",
-    "JPA",
-    "MONGO CONNECTOR",
-    "API-CONNECTOR INTERNO",
-    "API-CONNECTOR EXTERNO",
-    "API-CONNECTOR",
-    "TITAN CLIENT",
-    "GRPC CLIENT",
-    "OTROS",
-  ]);
-
-  for (const line of lines) {
-    const cleanLine = line.trim();
-    const normalizedHeader = cleanLine.replace(/^[├└│─\s]+/, "").trim();
-
-    if (!insideJdbc) {
-      if (/^JDBC(?:\s|$|\[)/i.test(normalizedHeader)) {
-        insideJdbc = true;
-        jdbcLines.push(line);
-      }
-
-      continue;
-    }
-
-    if (
-      sectionHeaders.has(normalizedHeader.toUpperCase()) ||
-      normalizedHeader.startsWith("🔵")
-    ) {
-      break;
-    }
-
-    jdbcLines.push(line);
-  }
-
-  return jdbcLines.join("\n");
-}
-
 function getJdbcMethodsFromTrace(trace: unknown): string[] {
-  const jdbcBlock = extractJdbcSection(trace);
-
-  if (!jdbcBlock.trim()) {
-    return [];
-  }
-
+  const text = String(trace ?? "");
   const methods = new Set<string>();
 
-  for (const rawLine of jdbcBlock.split(/\r?\n/)) {
-    const line = rawLine.replace(/^[├└│─\s]+/, "").trim();
+  // Formato actual del detalle: SELECT: 4 / UPDATE: 2 / etc.
+  for (const method of ["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE"]) {
+    const regex = new RegExp(`\\b${method}\\s*:\\s*\\d+`, "i");
 
-    const countedMethod = line.match(
-      /\b(SELECT|INSERT|UPDATE|DELETE|MERGE|WITH)\b\s*:\s*\d+(?:\s+saltos?)?/i,
-    )?.[1];
-
-    const jdbcBracketMethod = line.match(
-      /\bJDBC\s*\[\s*(SELECT|INSERT|UPDATE|DELETE|MERGE|WITH)\s*\]/i,
-    )?.[1];
-
-    const method = normalizeJdbcMethod(countedMethod ?? jdbcBracketMethod);
-
-    if (method) {
+    if (regex.test(text)) {
       methods.add(method);
     }
   }
 
-  return Array.from(methods);
-}
-
-function getJdbcMethodsFromStructuredData(row: MetricRow): string[] {
-  const methods = new Set<string>();
-  const utilityItems = safeJsonParse<UtilityTypeItem[]>(row.utilitytype, []);
-  const invokedItems = safeJsonParse<InvokedParamItem[]>(row.invokedparam, []);
-
-  const hasJdbcUtility = utilityItems.some((item) =>
-    /^jdbc$/i.test(String(item.utilitytype ?? "").trim()),
-  );
-
-  for (const item of invokedItems) {
-    const utilityType = String(item.utilitytype ?? "").trim();
-    const invokedParam = String(item.invokedparam ?? "").trim();
-
-    if (!/^jdbc$/i.test(utilityType) && !hasJdbcUtility) {
-      continue;
-    }
-
-    const method = normalizeJdbcMethod(invokedParam);
-
-    if (method) {
-      methods.add(method);
-    }
+  // Compatibilidad con el detalle individual.
+  if (/Consulta\s*·\s*Jdbc\[/i.test(text)) {
+    methods.add("SELECT");
   }
 
-  return Array.from(methods);
-}
-
-function getJdbcMethods(row: MetricRow): string[] {
-  const methods = new Set<string>(getJdbcMethodsFromTrace(row.trace));
-
-  for (const method of getJdbcMethodsFromStructuredData(row)) {
-    methods.add(method);
+  if (/Salto\s*·\s*Jdbc\[/i.test(text)) {
+    // Hay un salto JDBC aunque el encabezado del método no esté disponible.
+    methods.add("WRITE");
   }
 
   return Array.from(methods);
 }
 
 function buildJdbcAccessType(row: MetricRow): string {
-  const methods = getJdbcMethods(row);
+  const methods = getJdbcMethodsFromTrace(row.trace);
 
   if (!methods.length) {
     return "-";
   }
 
-  if (methods.some((method) => JDBC_WRITE_METHODS.has(method))) {
+  const hasWrite = methods.some((method) =>
+    ["INSERT", "UPDATE", "DELETE", "MERGE", "WRITE"].includes(method),
+  );
+
+  if (hasWrite) {
     return "JDBC [WRITE]";
   }
 
-  if (methods.some((method) => JDBC_READ_METHODS.has(method))) {
+  if (methods.includes("SELECT")) {
     return "JDBC [READ_ONLY]";
   }
 
@@ -672,6 +570,29 @@ function renderTraceCell(value: unknown) {
   );
 }
 
+function renderTraceSummaryCell(row: MetricRow) {
+  const summary = buildAwsTraceSummary(row).trim();
+
+  if (!summary || summary === "-") {
+    return <span className="text-muted-foreground">-</span>;
+  }
+
+  const [title, ...detailLines] = summary.split(/\r?\n/);
+
+  return (
+    <div className="min-w-[380px] overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+      <div className="border-b border-border bg-muted/40 px-3 py-2">
+        <div className="text-[11px] font-semibold uppercase tracking-wider text-foreground">
+          {title}
+        </div>
+      </div>
+      <pre className="max-h-96 overflow-auto whitespace-pre-wrap px-3 py-3 font-mono text-[11px] leading-5 text-foreground">
+        {detailLines.join("\n")}
+      </pre>
+    </div>
+  );
+}
+
 export default function MetricsTable({
   rows,
   loading = false,
@@ -732,6 +653,7 @@ export default function MetricsTable({
               <TableHead className="min-w-[160px]">JDBC Tipo</TableHead>
               <TableHead className="min-w-[320px]">InvokedParam</TableHead>
               <TableHead className="min-w-[540px]">Trace</TableHead>
+              <TableHead className="min-w-[380px]">Resumen Trazas AWS</TableHead>
               <TableHead className="min-w-[420px]">Informe AWS</TableHead>
             </TableRow>
           </TableHeader>
@@ -740,7 +662,7 @@ export default function MetricsTable({
             {!rows.length && !loading ? (
               <TableRow>
                 <TableCell
-                  colSpan={12}
+                  colSpan={13}
                   className="h-32 text-center text-sm text-muted-foreground"
                 >
                   Sin métricas para mostrar.
@@ -810,6 +732,10 @@ export default function MetricsTable({
                   </TableCell>
 
                   <TableCell>{renderTraceCell(row.trace)}</TableCell>
+
+                  <TableCell className="min-w-[380px] align-top">
+                    {renderTraceSummaryCell(row)}
+                  </TableCell>
 
                   <TableCell className="min-w-[420px] align-top">
                     <div className="space-y-2">

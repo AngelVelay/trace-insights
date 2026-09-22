@@ -12,19 +12,34 @@ import {
   createConcurrencyLimiter,
 } from "./httpClient";
 
-const RHO_BASE = "https://rho.live-02.nextgen.igrupobbva";
-const AWS_NETWORK_CONSTANT_MS = 89;
-const RHO_SEARCH_TIMEOUT_MS = 45000;
-const RHO_TRACE_TIMEOUT_MS = 90000;
+const RHO_LIVE_BASE = "https://rho.live-02.nextgen.igrupobbva";
+const RHO_WORK_BASE = "https://rho.work-02.nextgen.igrupobbva";
 
-const MAX_TRACE_IDS_PER_INVOKER = 24;
-const TRACE_MATCH_MIN_TOLERANCE_MS = 250;
-const TRACE_MATCH_TOLERANCE_RATIO = 0.20;
-const TRACE_MATCH_MAX_FALLBACK_MS = 10000;
-const TRACE_COMPLETENESS_TOLERANCE_MULTIPLIERS = [1, 2, 4, 8, 16];
+function isWorkSite(site?: string): boolean {
+  return String(site ?? "").trim().toUpperCase().startsWith("WORK-");
+}
+
+function getRhoBaseUrl(site?: string): string {
+  return isWorkSite(site) ? RHO_WORK_BASE : RHO_LIVE_BASE;
+}
+
+function buildRhoScopeFilter(filters: MetricsFilters): string | undefined {
+  if (isWorkSite(filters.site)) {
+    const environment = filters.environment?.trim().toUpperCase();
+    return environment ? `properties.env == "${environment}"` : undefined;
+  }
+
+  return filters.site?.trim()
+    ? `properties.site == "${filters.site.trim()}"`
+    : undefined;
+}
+const AWS_NETWORK_CONSTANT_MS = 0.89;
+
+const MAX_TRACE_IDS_PER_INVOKER = 1;
+const MAX_TRACE_IDS_PER_LIBRARY = 1;
 const USE_ROOT_SPAN_LOOKUP = true;
 
-const traceLimiter = createConcurrencyLimiter(2);
+const traceLimiter = createConcurrencyLimiter(3);
 
 const traceCache = new Map<string, RawSpan>();
 const rootSpanCache = new Map<string, string>();
@@ -138,62 +153,46 @@ function dedupeTraceChannels(
 function getCacheScope(filters: MetricsFilters, invokerTx: string): string {
   return [
     filters.site ?? "",
+    filters.environment ?? "",
     getSelectedChannelCodes(filters).join(","),
     invokerTx,
   ].join("|");
 }
 
 function normalizeDuration(span: RawSpan): number {
-  if (typeof span.duration === "number" && span.duration !== null) {
-    const d = span.duration;
-
-    if (d > 1_000_000) return d / 1_000_000;
-    if (d > 1_000) return d / 1000;
-    if (d < 1) return d * 1000;
-
-    return d;
-  }
-
+  /*
+   * Preferimos startDate/finishDate cuando RHO los entrega porque así evitamos
+   * interpretar incorrectamente la unidad de `duration`. La magnitud del
+   * timestamp permite distinguir ns/us/ms/s.
+   */
   if (
     typeof span.startDate === "number" &&
     typeof span.finishDate === "number" &&
+    Number.isFinite(span.startDate) &&
+    Number.isFinite(span.finishDate) &&
     span.finishDate >= span.startDate
   ) {
-    return (span.finishDate - span.startDate) / 1_000_000;
+    const diff = span.finishDate - span.startDate;
+    const magnitude = Math.max(Math.abs(span.startDate), Math.abs(span.finishDate));
+
+    if (magnitude >= 1e17) return diff / 1_000_000; // nanosegundos -> ms
+    if (magnitude >= 1e14) return diff / 1_000;     // microsegundos -> ms
+    if (magnitude >= 1e11) return diff;             // milisegundos
+    if (magnitude >= 1e9) return diff * 1_000;       // segundos -> ms
+  }
+
+  if (typeof span.duration === "number" && Number.isFinite(span.duration)) {
+    const d = span.duration;
+
+    // Compatibilidad con el formato habitual de RHO/APX.
+    if (d >= 1_000_000) return d / 1_000_000;
+    if (d >= 1_000) return d / 1_000;
+    if (d > 0 && d < 1) return d * 1_000;
+
+    return Math.max(0, d);
   }
 
   return 0;
-}
-
-function normalizeSpanStartOrder(span: RawSpan): number | null {
-  const candidates: unknown[] = [
-    span.startDate,
-    span.startTime,
-    span.recordDate,
-  ];
-
-  for (const candidate of candidates) {
-    if (typeof candidate === "number" && Number.isFinite(candidate)) {
-      return candidate;
-    }
-
-    if (typeof candidate === "string" && candidate.trim()) {
-      const trimmed = candidate.trim();
-      const numeric = Number(trimmed);
-
-      if (Number.isFinite(numeric)) {
-        return numeric;
-      }
-
-      const parsed = Date.parse(trimmed);
-
-      if (Number.isFinite(parsed)) {
-        return parsed;
-      }
-    }
-  }
-
-  return null;
 }
 
 function inferUtilityType(span: RawSpan): string {
@@ -319,12 +318,19 @@ export function normalizeSpans(
       String(properties["channel-code"] ?? "").trim() ||
       String(properties.channelCode ?? "").trim();
 
+    const utilityType = inferUtilityType(span);
+
+    // GRPC no forma parte de la traza funcional ni del cálculo AWS.
+    if (utilityType === "GRPCClient") {
+      continue;
+    }
+
     normalized.push({
       spanId,
       traceId: String(span.traceId ?? ""),
       name: String(span.name ?? ""),
       durationMs: normalizeDuration(span),
-      utilityType: inferUtilityType(span),
+      utilityType,
       channelCode,
       properties,
     } as NormalizedSpan);
@@ -388,6 +394,8 @@ function buildRhoChannelCodeFilter(channelCodes: string[]): string | undefined {
 }
 
 function buildRhoSpanSearchUrl(params: {
+  baseSite?: string;
+  environment?: string;
   invokerTx?: string;
   traceId?: string;
   fromDate: string;
@@ -400,6 +408,8 @@ function buildRhoSpanSearchUrl(params: {
   includeDuration?: boolean;
 }): string {
   const {
+    baseSite,
+    environment,
     invokerTx,
     traceId,
     fromDate,
@@ -444,8 +454,15 @@ function buildRhoSpanSearchUrl(params: {
     filters.push(`traceId == "${traceId.trim()}"`);
   }
 
-  if (site?.trim()) {
+  const selectedSite = String(baseSite ?? site ?? "").trim().toUpperCase();
+  const useWorkEnvironment = selectedSite.startsWith("WORK-");
+
+  if (!useWorkEnvironment && site?.trim()) {
     filters.push(`properties.site == "${site.trim()}"`);
+  }
+
+  if (useWorkEnvironment && environment?.trim()) {
+    filters.push(`properties.env == "${environment.trim().toUpperCase()}"`);
   }
 
   const channelFilter = buildRhoChannelCodeFilter(channelCodes);
@@ -465,7 +482,10 @@ function buildRhoSpanSearchUrl(params: {
 
   const q = filters.join(" and ");
 
-  const url = new URL("/v1/ns/apx.online/spans", RHO_BASE);
+  const url = new URL(
+    "/v1/ns/apx.online/spans",
+    getRhoBaseUrl(baseSite ?? site)
+  );
 
   url.searchParams.set("q", q);
   url.searchParams.set("sort", "ascending");
@@ -501,12 +521,13 @@ function buildRhoTraceUrl(params: {
   spanId: string;
   fromDate: string;
   toDate: string;
+  site?: string;
 }): string {
-  const { spanId, fromDate, toDate } = params;
+  const { spanId, fromDate, toDate, site } = params;
 
   const url = new URL(
     `/v1/ns/apx.online/mrs/RhoTraces/spans/${spanId}:trace`,
-    RHO_BASE
+    getRhoBaseUrl(site)
   );
 
   url.searchParams.set("fromDate", fromDate);
@@ -521,12 +542,13 @@ function buildRhoSpanDetailUrl(params: {
   spanId: string;
   fromDate: string;
   toDate: string;
+  site?: string;
 }): string {
-  const { spanId, fromDate, toDate } = params;
+  const { spanId, fromDate, toDate, site } = params;
 
   const url = new URL(
     `/v1/ns/apx.online/mrs/RhoTraces/spans/${spanId}`,
-    RHO_BASE
+    getRhoBaseUrl(site)
   );
 
   url.searchParams.set("profile", "default");
@@ -691,6 +713,7 @@ export async function fetchTraceSpanMetadata(
     spanId: spanId.trim(),
     fromDate: from,
     toDate: to,
+    site: filters.site,
   });
 
   console.log("[RHO span detail metadata URL]", {
@@ -700,7 +723,6 @@ export async function fetchTraceSpanMetadata(
 
   const response = await apiRequest<RhoSpanDetailResponse>(url, {
     headers: buildAuthHeaders(filters.bearerToken),
-    timeoutMs: RHO_SEARCH_TIMEOUT_MS,
   });
 
   const span = unwrapRhoSpanDetail(response);
@@ -769,17 +791,18 @@ async function searchBestSpan(
     useSiteFilter: boolean;
     useChannelFilter: boolean;
     useDurationFilter: boolean;
-    durationTargetMs?: number;
   }): Promise<RawSpan | null> => {
     const url = buildRhoSpanSearchUrl({
+      baseSite: filters.site,
+      environment: filters.environment,
       invokerTx,
       fromDate: from,
       toDate: to,
       site: params.useSiteFilter ? filters.site : undefined,
       channelCodes: params.useChannelFilter ? channelCodes : [],
       durationMs:
-        params.useDurationFilter && params.durationTargetMs !== undefined
-          ? params.durationTargetMs
+        params.useDurationFilter && targetDuration !== undefined
+          ? targetDuration
           : undefined,
       invokerLibraryHint: params.useLibraryHint
         ? invokerLibraryHint
@@ -794,20 +817,17 @@ async function searchBestSpan(
         ? invokerLibraryHint
         : undefined,
       channelCodes: params.useChannelFilter ? channelCodes : [],
-      targetDuration: params.durationTargetMs ?? targetDuration,
+      targetDuration,
       useDurationFilter: params.useDurationFilter,
       url,
     });
 
-    const res = await apiRequest<SpansPaginatedResponse>(url, {
-      headers,
-      timeoutMs: RHO_SEARCH_TIMEOUT_MS,
-    });
+    const res = await apiRequest<SpansPaginatedResponse>(url, { headers });
     const items = Array.isArray(res.data) ? res.data : [];
 
     const best = sortSpansByDurationTarget(
       validSearchSpans(items),
-      params.durationTargetMs ?? targetDuration
+      targetDuration
     )[0];
 
     if (best) {
@@ -817,7 +837,7 @@ async function searchBestSpan(
         selectedSpanId: best.spanId,
         selectedTraceId: best.traceId,
         selectedDuration: normalizeDuration(best),
-        targetDuration: params.durationTargetMs ?? targetDuration,
+        targetDuration,
       });
     }
 
@@ -881,19 +901,12 @@ const filteredAttempts = strictChannel
   ? attempts.filter((attempt) => attempt.useChannelFilter)
   : attempts;
 
-const expandedTargets = getExpandedResponseTimeTargets(targetDuration);
-
 for (const attempt of filteredAttempts) {
-  if (attempt.useDurationFilter && expandedTargets.length > 0) {
-    for (const durationTargetMs of expandedTargets) {
-      const span = await search({ ...attempt, durationTargetMs });
-      if (span) return span;
-    }
-    continue;
-  }
-
   const span = await search(attempt);
-  if (span) return span;
+
+  if (span) {
+    return span;
+  }
 }
 
 return null;
@@ -917,91 +930,109 @@ async function searchSpansByLibraries(
     )
   );
 
-  if (!cleanHints.length) return [];
+  if (!cleanHints.length) {
+    return [];
+  }
 
   const targetDuration =
     typeof responseTimeMs === "number" &&
-    Number.isFinite(responseTimeMs) &&
-    responseTimeMs > 0
+      Number.isFinite(responseTimeMs) &&
+      responseTimeMs > 0
       ? Math.round(responseTimeMs)
       : undefined;
-
-  const collected = new Map<string, RawSpan>();
-
-  const appendItems = (items: RawSpan[]) => {
-    for (const span of validSearchSpans(items)) {
-      const key = String(span.traceId ?? span.spanId ?? "").trim();
-      if (key && !collected.has(key)) collected.set(key, span);
-    }
-  };
 
   const search = async (params: {
     useSiteFilter: boolean;
     useChannelFilter: boolean;
-    durationTargetMs?: number;
-  }): Promise<void> => {
-    const useDurationFilter = params.durationTargetMs !== undefined;
+    useDurationFilter: boolean;
+  }): Promise<RawSpan[]> => {
     const url = buildRhoSpanSearchUrl({
+      baseSite: filters.site,
+      environment: filters.environment,
       invokerTx,
       fromDate: from,
       toDate: to,
       site: params.useSiteFilter ? filters.site : undefined,
       channelCodes: params.useChannelFilter ? channelCodes : [],
-      durationMs: params.durationTargetMs,
+      durationMs:
+        params.useDurationFilter && targetDuration !== undefined
+          ? targetDuration
+          : undefined,
       invokerLibraryHints: cleanHints,
-      includeDuration: useDurationFilter,
+      includeDuration: params.useDurationFilter,
     });
 
-    try {
-      const res = await apiRequest<SpansPaginatedResponse>(url, {
-        headers,
-        timeoutMs: RHO_SEARCH_TIMEOUT_MS,
-      });
-      appendItems(Array.isArray(res.data) ? res.data : []);
-    } catch (error) {
-      console.warn("[RHO] Falló un intento de búsqueda de candidatos", {
-        invokerTx,
-        durationTargetMs: params.durationTargetMs,
-        useSiteFilter: params.useSiteFilter,
-        useChannelFilter: params.useChannelFilter,
-        error,
-      });
-    }
+    console.log("[RHO multi-library span search URL]", {
+      invokerTx,
+      site: params.useSiteFilter ? filters.site : undefined,
+      channelCodes: params.useChannelFilter ? channelCodes : [],
+      invokerLibraryHints: cleanHints,
+      targetDuration,
+      useDurationFilter: params.useDurationFilter,
+      url,
+    });
+
+    const res = await apiRequest<SpansPaginatedResponse>(url, { headers });
+    const items = Array.isArray(res.data) ? res.data : [];
+
+    return sortSpansByDurationTarget(
+      validSearchSpans(items),
+      targetDuration
+    );
   };
 
-  const expandedTargets = getExpandedResponseTimeTargets(targetDuration);
-  const strictChannel = shouldUseStrictChannel(filters);
-  const scopes = strictChannel
-    ? [
-        { useSiteFilter: Boolean(filters.site), useChannelFilter: true },
-        { useSiteFilter: false, useChannelFilter: true },
-        { useSiteFilter: Boolean(filters.site), useChannelFilter: false },
-        { useSiteFilter: false, useChannelFilter: false },
-      ]
-    : [
-        { useSiteFilter: Boolean(filters.site), useChannelFilter: false },
-        { useSiteFilter: false, useChannelFilter: false },
-      ];
+  const attempts = [
+    {
+      useSiteFilter: Boolean(filters.site),
+      useChannelFilter: channelCodes.length > 0,
+      useDurationFilter: targetDuration !== undefined,
+    },
+    {
+      useSiteFilter: Boolean(filters.site),
+      useChannelFilter: channelCodes.length > 0,
+      useDurationFilter: false,
+    },
+    {
+      useSiteFilter: Boolean(filters.site),
+      useChannelFilter: false,
+      useDurationFilter: targetDuration !== undefined,
+    },
+    {
+      useSiteFilter: Boolean(filters.site),
+      useChannelFilter: false,
+      useDurationFilter: false,
+    },
+    {
+      useSiteFilter: false,
+      useChannelFilter: channelCodes.length > 0,
+      useDurationFilter: targetDuration !== undefined,
+    },
+    {
+      useSiteFilter: false,
+      useChannelFilter: channelCodes.length > 0,
+      useDurationFilter: false,
+    },
+    {
+      useSiteFilter: false,
+      useChannelFilter: false,
+      useDurationFilter: targetDuration !== undefined,
+    },
+    {
+      useSiteFilter: false,
+      useChannelFilter: false,
+      useDurationFilter: false,
+    },
+  ];
 
-  // Reunimos candidatos de varios rangos. No regresamos en el primer resultado,
-  // porque ese span puede pertenecer a una traza pequeña o incompleta.
-  for (const scope of scopes) {
-    for (const durationTargetMs of expandedTargets) {
-      await search({ ...scope, durationTargetMs });
-      if (collected.size >= MAX_TRACE_IDS_PER_INVOKER) break;
+  for (const attempt of attempts) {
+    const spans = await search(attempt);
+
+    if (spans.length > 0) {
+      return spans;
     }
-
-    // La consulta sin duración permite recuperar trazas completas aunque la
-    // medición de invokerTX y la duración almacenada tengan desfase.
-    await search(scope);
-
-    if (collected.size >= MAX_TRACE_IDS_PER_INVOKER) break;
   }
 
-  return sortSpansByDurationTarget(
-    Array.from(collected.values()),
-    targetDuration
-  ).slice(0, MAX_TRACE_IDS_PER_INVOKER);
+  return [];
 }
 
 function getSpanProperty(span: RawSpan | null | undefined, key: string): string {
@@ -1058,6 +1089,8 @@ async function searchTransactionSpanIdByTraceId(params: {
   const headers = buildAuthHeaders(filters.bearerToken);
 
   const url = buildRhoSpanSearchUrl({
+    baseSite: filters.site,
+    environment: filters.environment,
     traceId,
     invokerTx,
     fromDate: from,
@@ -1075,7 +1108,7 @@ async function searchTransactionSpanIdByTraceId(params: {
   const q = [
     `name == "${invokerTx}"`,
     `traceId == "${traceId}"`,
-    filters.site ? `properties.site == "${filters.site}"` : undefined,
+    buildRhoScopeFilter(filters),
     `properties.invokerTx == "${invokerTx}"`,
   ]
     .filter(Boolean)
@@ -1092,7 +1125,6 @@ async function searchTransactionSpanIdByTraceId(params: {
   try {
     const res = await apiRequest<SpansPaginatedResponse>(rawUrl.toString(), {
       headers,
-      timeoutMs: RHO_SEARCH_TIMEOUT_MS,
     });
 
     const items = Array.isArray(res.data) ? res.data : [];
@@ -1176,6 +1208,8 @@ async function searchRootSpanIdByTraceId(params: {
     useInvokerTxFilter: boolean;
   }): Promise<string | null> => {
     const url = buildRhoSpanSearchUrl({
+      baseSite: filters.site,
+      environment: filters.environment,
       traceId,
       invokerTx: params.useInvokerTxFilter ? invokerTx : undefined,
       fromDate: from,
@@ -1194,10 +1228,7 @@ async function searchRootSpanIdByTraceId(params: {
       url,
     });
 
-    const res = await apiRequest<SpansPaginatedResponse>(url, {
-      headers,
-      timeoutMs: RHO_SEARCH_TIMEOUT_MS,
-    });
+    const res = await apiRequest<SpansPaginatedResponse>(url, { headers });
     const items = Array.isArray(res.data) ? (res.data as SpanWithParent[]) : [];
 
     if (!items.length) {
@@ -1220,12 +1251,10 @@ async function searchRootSpanIdByTraceId(params: {
       return hasChannelMetadata(span);
     });
 
-    // Para descargar la traza completa debemos usar el root global real.
-    // El span Transaction de invokerTX puede ser un hijo y devolver solo un subárbol.
     const root =
-      rootLikeSpan ??
       transactionWithChannel ??
       transactionSpan ??
+      rootLikeSpan ??
       spanWithChannel ??
       items.sort((a, b) => normalizeDuration(b) - normalizeDuration(a))[0];
 
@@ -1255,20 +1284,18 @@ async function searchRootSpanIdByTraceId(params: {
   };
 
   const attempts = [
-    // Primero buscamos todos los spans del traceId, sin limitar al invokerTX,
-    // para poder localizar el root global y descargar el árbol completo.
+    {
+      useSiteFilter: Boolean(filters.site),
+      useChannelFilter: channelCodes.length > 0,
+      useInvokerTxFilter: true,
+    },
     {
       useSiteFilter: Boolean(filters.site),
       useChannelFilter: false,
-      useInvokerTxFilter: false,
+      useInvokerTxFilter: true,
     },
     {
       useSiteFilter: false,
-      useChannelFilter: false,
-      useInvokerTxFilter: false,
-    },
-    {
-      useSiteFilter: Boolean(filters.site),
       useChannelFilter: channelCodes.length > 0,
       useInvokerTxFilter: true,
     },
@@ -1276,6 +1303,16 @@ async function searchRootSpanIdByTraceId(params: {
       useSiteFilter: false,
       useChannelFilter: false,
       useInvokerTxFilter: true,
+    },
+    {
+      useSiteFilter: Boolean(filters.site),
+      useChannelFilter: false,
+      useInvokerTxFilter: false,
+    },
+    {
+      useSiteFilter: false,
+      useChannelFilter: false,
+      useInvokerTxFilter: false,
     },
   ];
 
@@ -1340,6 +1377,7 @@ async function fetchFullTraceByHintSpan(params: {
     spanId: rootSpanId,
     fromDate: from,
     toDate: to,
+    site: filters.site,
   });
 
   console.log("[RHO full trace by library span URL]", {
@@ -1352,218 +1390,11 @@ async function fetchFullTraceByHintSpan(params: {
     url,
   });
 
-  const trace = await apiRequest<RawSpan>(url, {
-    headers,
-    timeoutMs: RHO_TRACE_TIMEOUT_MS,
-  });
+  const trace = await apiRequest<RawSpan>(url, { headers });
 
   traceCache.set(traceCacheKey, trace);
 
   return trace;
-}
-
-
-function getSpanParentId(span: RawSpan): string {
-  const candidate = span as SpanWithParent;
-  return String(
-    candidate.parentSpanId ?? candidate.parentId ?? candidate.parentSpan ?? ""
-  ).trim();
-}
-
-function spanMatchesInvokerTx(span: RawSpan, invokerTx: string): boolean {
-  const expected = invokerTx.trim().toLowerCase();
-  if (!expected) return false;
-
-  const props = span.properties ?? {};
-  const values = [
-    span.name,
-    props.invokerTx,
-    props.invokertx,
-    props.transaction,
-    props.transactionName,
-    props.operation,
-    props.invokerLibrary,
-  ];
-
-  return values.some((value) => {
-    const normalized = String(value ?? "").trim().toLowerCase();
-    return normalized === expected || normalized.includes(expected);
-  });
-}
-
-/**
- * Encuentra dentro de la traza completa el span transaccional que representa
- * a invokerTX. La duración a comparar es la de este span ancla, no la del root
- * global de la traza ni la suma de utilities hijas.
- */
-function getTraceDurationMs(trace: RawSpan, invokerTx: string): number {
-  const spans = flattenSpans([trace]);
-  if (!spans.length) return 0;
-
-  const matching = spans.filter((span) => spanMatchesInvokerTx(span, invokerTx));
-  const transactionMatching = matching.filter((span) =>
-    isTransactionSpan(span, invokerTx)
-  );
-  const candidates = transactionMatching.length ? transactionMatching : matching;
-
-  if (!candidates.length) return 0;
-
-  // Cuando hay varios spans del mismo invokerTX, el de mayor duración suele ser
-  // el contenedor transaccional y no una utility hija.
-  return candidates.reduce(
-    (maxDuration, span) => Math.max(maxDuration, normalizeDuration(span)),
-    0
-  );
-}
-
-function getTraceMatchToleranceMs(responseTimeMs: number): number {
-  return Math.max(
-    TRACE_MATCH_MIN_TOLERANCE_MS,
-    Math.round(responseTimeMs * TRACE_MATCH_TOLERANCE_RATIO)
-  );
-}
-
-/**
- * RHO compara duration por igualdad exacta. Para no perder trazas por pequeñas
- * diferencias entre invokerTX y el span almacenado, probamos duraciones cada vez
- * mayores y finalmente hacemos una búsqueda sin filtro de duración.
- */
-function getExpandedResponseTimeTargets(responseTimeMs?: number): number[] {
-  const target = Number(responseTimeMs);
-  if (!Number.isFinite(target) || target <= 0) return [];
-
-  const base = Math.max(1, Math.round(target));
-  const candidates = [
-    base,
-    base + 25,
-    base + 50,
-    base + 100,
-    base + 250,
-    base + 500,
-    base + 1000,
-    base + 2000,
-    Math.round(base * 1.5),
-    Math.round(base * 2),
-    Math.round(base * 3),
-    Math.round(base * 5),
-    Math.round(base * 10),
-  ];
-
-  return Array.from(new Set(candidates.filter((value) => value > 0))).sort(
-    (a, b) => a - b
-  );
-}
-
-function getTraceCompleteness(trace: RawSpan): {
-  spanCount: number;
-  utilityCount: number;
-  positiveDurationCount: number;
-} {
-  const spans = flattenSpans([trace]);
-  const entries: TraceEntry[] = [];
-  collectTraceEntries(trace, entries);
-  const uniqueEntries = dedupeTraceEntries(entries);
-
-  return {
-    spanCount: spans.length,
-    utilityCount: uniqueEntries.length,
-    positiveDurationCount: uniqueEntries.filter(
-      (entry) => Number(entry.durationMs) > 0
-    ).length,
-  };
-}
-
-function selectConcordantTrace(
-  traces: RawSpan[],
-  invokerTx: string,
-  responseTimeMs?: number
-): RawSpan | null {
-  if (!traces.length) return null;
-
-  const target = Number(responseTimeMs);
-  const ranked = traces
-    .map((trace) => {
-      const traceDurationMs = getTraceDurationMs(trace, invokerTx);
-      const completeness = getTraceCompleteness(trace);
-      return {
-        trace,
-        traceDurationMs,
-        differenceMs:
-          Number.isFinite(target) && target > 0 && traceDurationMs > 0
-            ? Math.abs(traceDurationMs - target)
-            : Number.POSITIVE_INFINITY,
-        ...completeness,
-      };
-    })
-    .filter((candidate) => candidate.spanCount > 0);
-
-  if (!ranked.length) return null;
-
-  const compareCompleteness = (
-    a: (typeof ranked)[number],
-    b: (typeof ranked)[number]
-  ) => {
-    if (a.utilityCount !== b.utilityCount) {
-      return b.utilityCount - a.utilityCount;
-    }
-    if (a.spanCount !== b.spanCount) {
-      return b.spanCount - a.spanCount;
-    }
-    if (a.positiveDurationCount !== b.positiveDurationCount) {
-      return b.positiveDurationCount - a.positiveDurationCount;
-    }
-    return a.differenceMs - b.differenceMs;
-  };
-
-  if (!Number.isFinite(target) || target <= 0) {
-    return [...ranked].sort(compareCompleteness)[0].trace;
-  }
-
-  const baseTolerance = getTraceMatchToleranceMs(target);
-
-  // Ampliamos el tiempo de respuesta por niveles. En el primer nivel que tenga
-  // candidatos, elegimos la traza más completa, no simplemente la más cercana.
-  for (const multiplier of TRACE_COMPLETENESS_TOLERANCE_MULTIPLIERS) {
-    const toleranceMs = Math.min(
-      TRACE_MATCH_MAX_FALLBACK_MS,
-      Math.max(baseTolerance, Math.round(baseTolerance * multiplier))
-    );
-    const candidates = ranked.filter(
-      (candidate) =>
-        candidate.traceDurationMs > 0 &&
-        candidate.differenceMs <= toleranceMs
-    );
-
-    if (candidates.length > 0) {
-      const selected = [...candidates].sort(compareCompleteness)[0];
-      console.log("[RHO selected complete trace]", {
-        invokerTx,
-        responseTimeMs: target,
-        toleranceMs,
-        traceId: String(selected.trace.traceId ?? ""),
-        invokerSpanDurationMs: selected.traceDurationMs,
-        differenceMs: selected.differenceMs,
-        utilityCount: selected.utilityCount,
-        spanCount: selected.spanCount,
-      });
-      return selected.trace;
-    }
-  }
-
-  // Último recurso: elegimos la traza más completa de las recuperadas. Así no
-  // se pierde el detalle por imponer una concordancia temporal imposible.
-  const fallback = [...ranked].sort(compareCompleteness)[0];
-  console.warn("[RHO] Se amplió la tolerancia para conservar la traza más completa", {
-    invokerTx,
-    responseTimeMs: target,
-    traceId: String(fallback.trace.traceId ?? ""),
-    invokerSpanDurationMs: fallback.traceDurationMs,
-    differenceMs: fallback.differenceMs,
-    utilityCount: fallback.utilityCount,
-    spanCount: fallback.spanCount,
-  });
-
-  return fallback.trace;
 }
 
 function getLimitedUniqueHintSpans(spans: RawSpan[]): RawSpan[] {
@@ -1703,21 +1534,32 @@ function getSqlMethod(databaseQuery: string): string {
     : "DESCONOCIDO";
 }
 
-function sortTraceEntriesByExecutionOrder(entries: TraceEntry[]): TraceEntry[] {
-  return [...entries].sort((a, b) => {
-    const aHasTime = Number.isFinite(a.startOrder);
-    const bHasTime = Number.isFinite(b.startOrder);
+const JDBC_WRITE_METHODS = new Set(["INSERT", "UPDATE", "DELETE"]);
 
-    if (aHasTime && bHasTime && a.startOrder !== b.startOrder) {
-      return (a.startOrder ?? 0) - (b.startOrder ?? 0);
+function isJdbcEntry(entry: TraceEntry): boolean {
+  return String(entry.utilitytype ?? "").trim().toLowerCase() === "jdbc";
+}
+
+function getJdbcSqlMethod(entry: TraceEntry): string {
+  const candidates = [
+    entry.databaseQuery,
+    entry.invokedparam,
+    entry.name,
+  ];
+
+  for (const candidate of candidates) {
+    const method = getSqlMethod(String(candidate ?? ""));
+
+    if (method && method !== "DESCONOCIDO") {
+      return method;
     }
+  }
 
-    if (aHasTime !== bHasTime) {
-      return aHasTime ? -1 : 1;
-    }
+  return getSqlMethod(String(entry.databaseQuery ?? "")) || "DESCONOCIDO";
+}
 
-    return a.sequence - b.sequence;
-  });
+function isJdbcSelectEntry(entry: TraceEntry): boolean {
+  return isJdbcEntry(entry) && getJdbcSqlMethod(entry) === "SELECT";
 }
 
 function isGrpcEntry(entry: TraceEntry): boolean {
@@ -1733,23 +1575,6 @@ function isGrpcEntry(entry: TraceEntry): boolean {
   return fingerprint.includes("GRPC");
 }
 
-function isJdbcEntry(entry: TraceEntry): boolean {
-  return String(entry.utilitytype ?? "").trim().toLowerCase() === "jdbc";
-}
-
-const JDBC_WRITE_METHODS = new Set(["INSERT", "UPDATE", "DELETE", "MERGE"]);
-
-/**
- * Las escrituras JDBC habilitan que los SELECT posteriores del mismo flujo
- * sean clasificados como salto.
- */
-const JDBC_SELECT_AFTER_WRITE_METHODS = new Set([
-  "INSERT",
-  "UPDATE",
-  "DELETE",
-  "MERGE",
-]);
-
 const AWS_UTILITY_JUMP_TYPES = new Set([
   "InterBackendCics",
   "APIInternalConnectorImpl",
@@ -1764,37 +1589,48 @@ function isAwsUtilityJumpEntry(entry: TraceEntry): boolean {
     return false;
   }
 
+  /*
+   * Solo las utilidades reales que reconoce y muestra el reporte cuentan como
+   * salto. No usamos declaredUtilityType como fallback porque algunos spans
+   * contenedores o técnicos traen valores que no representan una llamada real
+   * de utilidad y provocaban falsos saltos.
+   */
   const inferredType = String(entry.utilitytype ?? "").trim();
   return AWS_UTILITY_JUMP_TYPES.has(inferredType);
 }
 
-function getJdbcSqlMethod(entry: TraceEntry): string {
-  const candidates = [entry.databaseQuery, entry.invokedparam, entry.name];
-
-  for (const candidate of candidates) {
-    const method = getSqlMethod(String(candidate ?? ""));
-
-    if (method && method !== "DESCONOCIDO") {
-      return method;
-    }
-  }
-
-  return getSqlMethod(String(entry.databaseQuery ?? "")) || "DESCONOCIDO";
-}
-
-function getTraceEntryJumpFlags(entries: TraceEntry[]): boolean[] {
+/**
+ * Clasificación definitiva para Métricas AWS Monitoreo.
+ *
+ * Regla de negocio:
+ * - JDBC SELECT siempre es Consulta. Nunca incrementa Saltos a Lago Esmeralda.
+ * - JDBC INSERT/UPDATE/DELETE son Saltos.
+ * - Las utilidades no JDBC reconocidas (CICS, API Connector, JPA, Mongo y Titan)
+ *   son Saltos.
+ * - GRPC se excluye por completo.
+ * - UNKNOWN y spans técnicos no cuentan como salto.
+ *
+ * Importante: no se conserva estado global entre entradas. La versión anterior
+ * activaba una bandera al encontrar MONGO/API/CICS y convertía todos los SELECT
+ * posteriores del árbol a Salto, aunque fueran simples lecturas JDBC.
+ */
+function getAwsJumpFlags(entries: TraceEntry[]): boolean[] {
   return entries.map((entry) => {
     if (isGrpcEntry(entry)) {
       return false;
     }
 
-    if (!isJdbcEntry(entry)) {
-      return isAwsUtilityJumpEntry(entry);
+    if (isJdbcEntry(entry)) {
+      const method = getJdbcSqlMethod(entry);
+
+      if (method === "SELECT") {
+        return false;
+      }
+
+      return JDBC_WRITE_METHODS.has(method);
     }
 
-    // JDBC SELECT es una consulta, no un salto. Solo las escrituras JDBC
-    // se contabilizan como salto para el cálculo esperado en AWS.
-    return JDBC_WRITE_METHODS.has(getJdbcSqlMethod(entry));
+    return isAwsUtilityJumpEntry(entry);
   });
 }
 
@@ -1815,19 +1651,49 @@ function getMongoOperation(item: TraceEntry): string {
 function formatTraceDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return "0ms";
 
-  const totalMs = Math.round(ms);
-  const seconds = Math.floor(totalMs / 1000);
-  const restMs = totalMs % 1000;
+  const seconds = Math.floor(ms / 1000);
+  const remainingMs = Math.max(0, ms - seconds * 1000);
+  const roundedMs = Math.round(remainingMs * 100) / 100;
+  const msText = Number.isInteger(roundedMs)
+    ? String(roundedMs)
+    : roundedMs.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
 
-  if (seconds === 0) {
-    return `${restMs}ms`;
+  if (seconds <= 0) return `${msText}ms`;
+  if (roundedMs === 0) return `${seconds}s`;
+
+  return `${seconds}s ${msText}ms`;
+}
+
+
+function normalizeSpanStartOrder(span: RawSpan): number | null {
+  const candidates: unknown[] = [
+    span.startDate,
+    span.startTime,
+    span.recordDate,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "number" && Number.isFinite(candidate)) {
+      return candidate;
+    }
+
+    if (typeof candidate === "string" && candidate.trim()) {
+      const trimmed = candidate.trim();
+      const numeric = Number(trimmed);
+
+      if (Number.isFinite(numeric)) {
+        return numeric;
+      }
+
+      const parsed = Date.parse(trimmed);
+
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
   }
 
-  if (restMs === 0) {
-    return `${seconds}s`;
-  }
-
-  return `${seconds}s ${restMs}ms`;
+  return null;
 }
 
 function collectTraceEntries(
@@ -1858,13 +1724,25 @@ function collectTraceEntries(
 
   const durationMs = normalizeDuration(node);
 
+  const rawFingerprint = [
+    utilitytype,
+    invokerLibrary,
+    invokedparam,
+    name,
+  ]
+    .map((value) => String(value ?? "").trim().toUpperCase())
+    .join(" ");
+
   if (
-    utilitytype !== "UNKNOWN" ||
-    invokerLibrary ||
-    invokedparam ||
-    databaseQuery ||
-    databaseInstance ||
-    collection
+    !rawFingerprint.includes("GRPC") &&
+    (
+      utilitytype !== "UNKNOWN" ||
+      invokerLibrary ||
+      invokedparam ||
+      databaseQuery ||
+      databaseInstance ||
+      collection
+    )
   ) {
     out.push({
       utilitytype,
@@ -1908,21 +1786,20 @@ function dedupeTraceEntries(entries: TraceEntry[]): TraceEntry[] {
   const seen = new Set<string>();
   const result: TraceEntry[] = [];
 
-  for (const entry of sortTraceEntriesByExecutionOrder(entries)) {
-    // La duración no forma parte de la identidad. El mismo span puede llegar
-    // repetido con una duración distinta o redondeada y no debe sumarse otra vez.
+  for (const entry of entries) {
     const key = [
       entry.utilitytype,
+      entry.declaredUtilityType,
       entry.invokerLibrary,
       entry.invokedparam,
       entry.databaseInstance,
       entry.collection,
       entry.databaseQuery,
       entry.name,
+      entry.durationMs,
       entry.channelCode,
-    ]
-      .map((value) => String(value ?? "").trim().toUpperCase())
-      .join("|");
+      entry.startOrder ?? "",
+    ].join("|");
 
     if (seen.has(key)) {
       continue;
@@ -1934,6 +1811,46 @@ function dedupeTraceEntries(entries: TraceEntry[]): TraceEntry[] {
 
   return result;
 }
+
+function buildTraceEntriesSignature(entries: TraceEntry[]): string {
+  return entries
+    .map((entry) =>
+      [
+        entry.utilitytype,
+        entry.declaredUtilityType,
+        entry.invokerLibrary,
+        entry.invokedparam,
+        entry.databaseInstance,
+        entry.collection,
+        entry.databaseQuery,
+        entry.name,
+        entry.channelCode,
+      ]
+        .map((value) => String(value ?? "").trim())
+        .join("|")
+    )
+    .sort()
+    .join("||");
+}
+
+function dedupeTraceEntryFlows(flows: TraceEntry[][]): TraceEntry[][] {
+  const seen = new Set<string>();
+  const result: TraceEntry[][] = [];
+
+  for (const entries of flows) {
+    const signature = buildTraceEntriesSignature(entries);
+
+    if (!signature || seen.has(signature)) {
+      continue;
+    }
+
+    seen.add(signature);
+    result.push(entries);
+  }
+
+  return result;
+}
+
 
 function dedupeNormalizedSpans(spans: NormalizedSpan[]): NormalizedSpan[] {
   const seen = new Set<string>();
@@ -1983,11 +1900,10 @@ function getEntryDatabaseOrCollection(item: TraceEntry): string {
 }
 
 function getTotalDuration(entries: TraceEntry[]): number {
-  if (!entries.length) return 0;
-
-  return (
-    entries.reduce((sum, item) => sum + Number(item.durationMs ?? 0), 0)
-  );
+  return entries.reduce((sum, item) => {
+    const durationMs = Number(item.durationMs ?? 0);
+    return sum + (Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 0);
+  }, 0);
 }
 
 function groupBy<T>(
@@ -2012,9 +1928,9 @@ function buildCicsTreeSection(entries: TraceEntry[], lines: string[]) {
 
   lines.push("CICS");
 
-  const avg = getTotalDuration(entries);
+  const total = getTotalDuration(entries);
 
-  lines.push(`└── Tiempo total sección: ${formatTraceDuration(avg)}`);
+  lines.push(`└── Tiempo total sección: ${formatTraceDuration(total)}`);
 
   entries.forEach((item, index) => {
     const isLast = index === entries.length - 1;
@@ -2033,28 +1949,31 @@ function buildCicsTreeSection(entries: TraceEntry[], lines: string[]) {
   lines.push("");
 }
 
-function buildJdbcTreeSection(entries: TraceEntry[], lines: string[]) {
+function buildJdbcTreeSection(
+  entries: TraceEntry[],
+  lines: string[],
+  completeFlowEntries: TraceEntry[] = entries
+) {
   if (!entries.length) return;
 
   lines.push("JDBC");
 
-  const orderedEntries = sortTraceEntriesByExecutionOrder(entries);
-  const jumpFlags = getTraceEntryJumpFlags(orderedEntries);
+  const jumpFlags = getAwsJumpFlags(completeFlowEntries);
   const jumpByEntry = new Map<TraceEntry, boolean>();
 
-  orderedEntries.forEach((entry, index) => {
+  completeFlowEntries.forEach((entry, index) => {
     jumpByEntry.set(entry, jumpFlags[index] ?? false);
   });
 
-  const byLibrary = groupBy(orderedEntries, (item) => getEntryLibrary(item));
+  const byLibrary = groupBy(entries, (item) => getEntryLibrary(item));
 
   Object.entries(byLibrary).forEach(([library, libraryEntries]) => {
-    const avg = getTotalDuration(libraryEntries);
+    const total = getTotalDuration(libraryEntries);
 
-    lines.push(`└── ${library} (Tiempo total: ${formatTraceDuration(avg)})`);
+    lines.push(`└── ${library} (Tiempo total: ${formatTraceDuration(total)})`);
 
     const byMethod = groupBy(libraryEntries, (item) => {
-      return getJdbcSqlMethod(item) || "DESCONOCIDO";
+      return getJdbcSqlMethod(item);
     });
 
     Object.entries(byMethod).forEach(([method, methodEntries]) => {
@@ -2063,7 +1982,9 @@ function buildJdbcTreeSection(entries: TraceEntry[], lines: string[]) {
       methodEntries.forEach((item, index) => {
         const isLast = index === methodEntries.length - 1;
         const branch = isLast ? "    │   └──" : "    │   ├──";
-        const classification = jumpByEntry.get(item) === true ? "Salto" : "Consulta";
+        const classification = jumpByEntry.get(item) === true
+          ? "Salto"
+          : "Consulta";
 
         const invokedParam = getEntryInvokedParam(item);
         const database = getEntryDatabaseOrCollection(item);
@@ -2096,9 +2017,9 @@ function buildJpaTreeSection(entries: TraceEntry[], lines: string[]) {
   const byLibrary = groupBy(entries, (item) => getEntryLibrary(item));
 
   Object.entries(byLibrary).forEach(([library, libraryEntries]) => {
-    const avg = getTotalDuration(libraryEntries);
+    const total = getTotalDuration(libraryEntries);
 
-    lines.push(`└── ${library} (Tiempo total: ${formatTraceDuration(avg)})`);
+    lines.push(`└── ${library} (Tiempo total: ${formatTraceDuration(total)})`);
 
     libraryEntries.forEach((item, index) => {
       const isLast = index === libraryEntries.length - 1;
@@ -2131,9 +2052,9 @@ function buildMongoTreeSection(entries: TraceEntry[], lines: string[]) {
 
   lines.push("MONGO CONNECTOR");
 
-  const avg = getTotalDuration(entries);
+  const total = getTotalDuration(entries);
 
-  lines.push(`└── Tiempo total sección: ${formatTraceDuration(avg)}`);
+  lines.push(`└── Tiempo total sección: ${formatTraceDuration(total)}`);
 
   entries.forEach((item, index) => {
     const isLast = index === entries.length - 1;
@@ -2161,9 +2082,9 @@ function buildApiConnectorTreeSection(
 
   lines.push(title);
 
-  const avg = getTotalDuration(entries);
+  const total = getTotalDuration(entries);
 
-  lines.push(`└── Tiempo total sección: ${formatTraceDuration(avg)}`);
+  lines.push(`└── Tiempo total sección: ${formatTraceDuration(total)}`);
 
   entries.forEach((item, index) => {
     const isLast = index === entries.length - 1;
@@ -2199,9 +2120,9 @@ function buildGenericClientTreeSection(
   const byLibrary = groupBy(entries, (item) => getEntryLibrary(item));
 
   Object.entries(byLibrary).forEach(([library, libraryEntries]) => {
-    const avg = getTotalDuration(libraryEntries);
+    const total = getTotalDuration(libraryEntries);
 
-    lines.push(`└── ${library} (Tiempo total: ${formatTraceDuration(avg)})`);
+    lines.push(`└── ${library} (Tiempo total: ${formatTraceDuration(total)})`);
 
     libraryEntries.forEach((item, index) => {
       const isLast = index === libraryEntries.length - 1;
@@ -2226,9 +2147,9 @@ function buildOtherTreeSection(entries: TraceEntry[], lines: string[]) {
 
   lines.push("OTROS");
 
-  const avg = getTotalDuration(entries);
+  const total = getTotalDuration(entries);
 
-  lines.push(`└── Tiempo total sección: ${formatTraceDuration(avg)}`);
+  lines.push(`└── Tiempo total sección: ${formatTraceDuration(total)}`);
 
   entries.forEach((item, index) => {
     const isLast = index === entries.length - 1;
@@ -2256,7 +2177,7 @@ type TraceFlowSummary = {
   label: string;
   entries: TraceEntry[];
   totalSaltos: number;
-  tiempoTotalSaltos: number;
+  tiempoTotal: number;
   totalTiempoEsperadoAws: number;
 };
 
@@ -2266,37 +2187,51 @@ type AwsTraceCalculation = {
   totalTiempoEsperadoAws: number;
 };
 
-function getExpectedAwsTimeForEntries(entries: TraceEntry[]): number {
-  const metrics = calculateAwsTraceMetrics(entries);
-  return metrics.totalTiempoEsperadoAws;
-}
-
-function calculateAwsTraceMetrics(
-  entries: TraceEntry[],
-  _responseTimeMs = 0
-): AwsTraceCalculation {
-  const visibleEntries = dedupeTraceEntries(
-    entries.filter((entry) => !isGrpcEntry(entry))
-  );
-  const jumpFlags = getTraceEntryJumpFlags(visibleEntries);
-
-  const totalSaltos = jumpFlags.reduce(
-    (total, isJump) => total + (isJump ? 1 : 0),
+function getTraceResponseTime(entries: TraceEntry[]): number {
+  return entries.reduce(
+    (sum, item) => sum + Number(item.durationMs ?? 0),
     0
   );
+}
 
-  // El tiempo total del resumen siempre es la suma de las duraciones
-  // mostradas en el detalle de la traza. responseTimeMs de invokerTX se usa
-  // solamente para buscar y ordenar trazas candidatas, nunca para sustituir
-  // esta medicion.
-  const tiempoTotal = visibleEntries.reduce((total, entry) => {
-    const durationMs = Number(entry.durationMs);
+/**
+ * Reglas para el cálculo de AWS:
+ *
+ * 1. JDBC INSERT, UPDATE, DELETE y MERGE cuentan como salto.
+ * 2. Un JDBC SELECT anterior a cualquier INSERT/UPDATE/DELETE o utilidad
+ *    se conserva como consulta: aporta su tiempo de traza, pero no añade salto.
+ * 3. Un JDBC SELECT posterior a INSERT/UPDATE/DELETE cuenta como salto.
+ * 4. Un JDBC SELECT posterior a cualquier utilidad no JDBC dentro del mismo
+ *    flujo también cuenta como salto.
+ * 5. Las utilidades distintas de JDBC cuentan como salto.
+ * 6. GRPC se excluye del detalle, del tiempo y del número de saltos.
+ *
+ * Fórmula:
+ *   Tiempo total = suma de consultas + suma de saltos, sin GRPC.
+ *   Tiempo esperado AWS = Tiempo total + (constante de red x total de saltos).
+ */
+function calculateAwsTraceMetrics(entries: TraceEntry[]): AwsTraceCalculation {
+  const effectiveEntries = entries.filter((entry) => !isGrpcEntry(entry));
+  const jumpFlags = getAwsJumpFlags(effectiveEntries);
 
-    return (
-      total +
-      (Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 0)
-    );
-  }, 0);
+  let totalSaltos = 0;
+  let tiempoTotal = 0;
+
+  effectiveEntries.forEach((entry, index) => {
+    const durationMs = Number(entry.durationMs ?? 0);
+    const safeDurationMs =
+      Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 0;
+
+    /*
+     * El Tiempo total incluye consultas y saltos. De esta forma, un SELECT
+     * siempre conserva el tiempo real recuperado de RHO aunque sea Consulta.
+     */
+    tiempoTotal += safeDurationMs;
+
+    if (jumpFlags[index] === true) {
+      totalSaltos += 1;
+    }
+  });
 
   return {
     totalSaltos,
@@ -2306,22 +2241,23 @@ function calculateAwsTraceMetrics(
   };
 }
 
+function getExpectedAwsTimeForEntries(entries: TraceEntry[]): number {
+  return calculateAwsTraceMetrics(entries).totalTiempoEsperadoAws;
+}
+
 function buildTraceFlowSummary(
   entries: TraceEntry[],
   index: number,
   responseTimeMs = 0
 ): TraceFlowSummary {
-  const uniqueEntries = dedupeTraceEntries(
-    entries.filter((entry) => !isGrpcEntry(entry))
-  );
-  const calculation = calculateAwsTraceMetrics(uniqueEntries, responseTimeMs);
+  void responseTimeMs;
+
+  const calculation = calculateAwsTraceMetrics(entries);
 
   return {
     label: `Flujo ${index + 1}`,
-    entries: uniqueEntries,
-    totalSaltos: calculation.totalSaltos,
-    tiempoTotalSaltos: calculation.tiempoTotal,
-    totalTiempoEsperadoAws: calculation.totalTiempoEsperadoAws,
+    entries,
+    ...calculation,
   };
 }
 
@@ -2329,16 +2265,21 @@ function appendTraceSummaryHeader(
   lines: string[],
   summary: TraceFlowSummary
 ): void {
+  lines.push("RESUMEN DE SALTOS Y TIEMPOS DE RESPUESTA");
   lines.push(`Total de saltos encontrados: ${summary.totalSaltos}`);
-  lines.push(`Tiempo total: ${formatTraceDuration(summary.tiempoTotalSaltos)}`);
+  lines.push(`Tiempo total: ${formatTraceDuration(summary.tiempoTotal)}`);
   lines.push(
     `Total de Tiempo Esperado en AWS: ${formatTraceDuration(
       summary.totalTiempoEsperadoAws
     )}`
   );
+  lines.push("");
+  lines.push("=== DETALLE DE TRAZAS ===");
+  lines.push("");
 }
 
 function appendTraceDetail(entries: TraceEntry[], lines: string[]): void {
+  // Protección final: ningún elemento GRPC puede llegar al detalle visual.
   const visibleEntries = entries.filter((entry) => !isGrpcEntry(entry));
 
   const cicsEntries = visibleEntries.filter(
@@ -2373,14 +2314,15 @@ function appendTraceDetail(entries: TraceEntry[], lines: string[]): void {
     "Jpa",
     "DaasMongoConnector",
     "TitanClient",
+    "GRPCClient",
   ]);
 
   const otherEntries = visibleEntries.filter(
-    (entry) => !knownTypes.has(entry.utilitytype)
+    (entry) => !knownTypes.has(entry.utilitytype) && !isGrpcEntry(entry)
   );
 
   buildCicsTreeSection(cicsEntries, lines);
-  buildJdbcTreeSection(jdbcEntries, lines);
+  buildJdbcTreeSection(jdbcEntries, lines, visibleEntries);
   buildJpaTreeSection(jpaEntries, lines);
   buildMongoTreeSection(mongoEntries, lines);
 
@@ -2408,81 +2350,37 @@ function appendTraceDetail(entries: TraceEntry[], lines: string[]): void {
   buildOtherTreeSection(otherEntries, lines);
 }
 
-function appendMultiFlowTotals(
-  lines: string[],
+function buildCombinedFlowSummary(
   flowSummaries: TraceFlowSummary[]
-): void {
-  const totalSaltos = flowSummaries.reduce(
-    (sum, flow) => sum + flow.totalSaltos,
-    0
-  );
-
-  const tiempoTotalSaltos = flowSummaries.reduce(
-    (sum, flow) => sum + flow.tiempoTotalSaltos,
-    0
-  );
-
-  const totalTiempoEsperadoAws = flowSummaries.reduce(
-    (sum, flow) => sum + flow.totalTiempoEsperadoAws,
-    0
-  );
-
-  lines.push("============================================================");
-  lines.push("");
-  lines.push(
-    `Total de saltos encontrados: ${totalSaltos} - Suma de saltos de todos los flujos`
-  );
-
-  for (const flow of flowSummaries) {
-    lines.push(`❏ ${flow.label} - ${flow.totalSaltos} saltos`);
-  }
-
-  lines.push("");
-  lines.push(`Tiempo total: ${formatTraceDuration(tiempoTotalSaltos)}`);
-
-  for (const flow of flowSummaries) {
-    lines.push(`❏ ${flow.label} - ${formatTraceDuration(flow.tiempoTotalSaltos)}`);
-  }
-
-  lines.push("");
-  lines.push(
-    `Total de Tiempo Esperado en AWS: ${formatTraceDuration(
-      totalTiempoEsperadoAws
-    )}`
-  );
-
-  for (const flow of flowSummaries) {
-    lines.push(
-      `❏ ${flow.label} - ${formatTraceDuration(flow.totalTiempoEsperadoAws)}`
-    );
-  }
-}
-
-function appendTraceReport(
-  lines: string[],
-  summary: TraceFlowSummary
-): void {
-  lines.push("RESUMEN DE SALTOS Y TIEMPOS DE RESPUESTA");
-  appendTraceSummaryHeader(lines, summary);
-  lines.push("");
-  lines.push("============================================================");
-  lines.push("");
-  lines.push("=== DETALLE DE TRAZAS ===");
-  lines.push("");
-  appendTraceDetail(summary.entries, lines);
+): TraceFlowSummary {
+  return {
+    label: "Total",
+    entries: flowSummaries.flatMap((flow) => flow.entries),
+    totalSaltos: flowSummaries.reduce(
+      (sum, flow) => sum + flow.totalSaltos,
+      0
+    ),
+    tiempoTotal: flowSummaries.reduce(
+      (sum, flow) => sum + flow.tiempoTotal,
+      0
+    ),
+    totalTiempoEsperadoAws: flowSummaries.reduce(
+      (sum, flow) => sum + flow.totalTiempoEsperadoAws,
+      0
+    ),
+  };
 }
 
 function buildTraceSummary(entries: TraceEntry[], responseTimeMs = 0): string {
-  const visibleEntries = dedupeTraceEntries(
-    entries.filter((entry) => !isGrpcEntry(entry))
-  );
+  const visibleEntries = entries.filter((entry) => !isGrpcEntry(entry));
 
   if (!visibleEntries.length) return "Sin trazas encontradas";
 
   const summary = buildTraceFlowSummary(visibleEntries, 0, responseTimeMs);
   const lines: string[] = [];
 
-  appendTraceReport(lines, summary);
+  appendTraceSummaryHeader(lines, summary);
+  appendTraceDetail(visibleEntries, lines);
 
   return lines.join("\n").trim();
 }
@@ -2491,18 +2389,35 @@ function buildTraceSummaryByFlows(
   flows: TraceEntry[][],
   responseTimeMs = 0
 ): string {
-  const uniqueEntries = dedupeTraceEntries(
-    flows
-      .flat()
-      .filter((entry) => !isGrpcEntry(entry))
+  const validFlows = flows
+    .map((entries) => entries.filter((entry) => !isGrpcEntry(entry)))
+    .filter((entries) => entries.length > 0);
+
+  if (!validFlows.length) return "Sin trazas encontradas";
+
+  if (validFlows.length === 1) {
+    return buildTraceSummary(validFlows[0], responseTimeMs);
+  }
+
+  const flowSummaries = validFlows.map((entries, index) =>
+    buildTraceFlowSummary(entries, index, responseTimeMs)
   );
-
-  if (!uniqueEntries.length) return "Sin trazas encontradas";
-
-  const summary = buildTraceFlowSummary(uniqueEntries, 0, responseTimeMs);
+  const combinedSummary = buildCombinedFlowSummary(flowSummaries);
   const lines: string[] = [];
 
-  appendTraceReport(lines, summary);
+  appendTraceSummaryHeader(lines, combinedSummary);
+
+  flowSummaries.forEach((flow, index) => {
+    if (index > 0) {
+      lines.push("");
+      lines.push("--------------------------");
+      lines.push("");
+    }
+
+    lines.push(flow.label);
+    lines.push("");
+    appendTraceDetail(flow.entries, lines);
+  });
 
   return lines.join("\n").trim();
 }
@@ -2534,39 +2449,35 @@ async function fetchTracesByLibraries(params: {
     return [];
   }
 
-  const hintSpans = await searchSpansByLibraries(
+  /*
+   * IMPORTANTE: para una fila de Métricas AWS Monitoreo usamos UNA sola
+   * ejecución/traceId representativa, la más cercana al tiempo de respuesta
+   * de la transacción. Antes se podía recuperar una traza distinta por cada
+   * library y luego sumar todas como si fueran una sola ejecución; eso hacía
+   * que algunos tiempos se dispararan y dejaran de concordar con Atenea.
+   */
+  const candidates = await searchSpansByLibraries(
     filters,
     invokerTx,
     cleanHints,
     responseTimeMs
   );
 
-  const uniqueHintSpans = getLimitedUniqueHintSpans(hintSpans);
+  const hintSpan = getLimitedUniqueHintSpans(candidates)[0] ?? null;
 
-  if (!uniqueHintSpans.length) {
+  if (!hintSpan) {
     return [];
   }
 
-  const traces = await Promise.all(
-    uniqueHintSpans.map((span) =>
-      traceLimiter(() =>
-        fetchFullTraceByHintSpan({
-          filters,
-          invokerTx,
-          hintSpan: span,
-        })
-      )
-    )
+  const trace = await traceLimiter(() =>
+    fetchFullTraceByHintSpan({
+      filters,
+      invokerTx,
+      hintSpan,
+    })
   );
 
-  const validTraces = traces.filter((trace): trace is RawSpan => Boolean(trace));
-  const selectedTrace = selectConcordantTrace(
-    validTraces,
-    invokerTx,
-    responseTimeMs
-  );
-
-  return selectedTrace ? [selectedTrace] : [];
+  return trace ? [trace] : [];
 }
 
 export async function fetchSpans(
@@ -2589,9 +2500,22 @@ export async function fetchSpans(
       libraryTraces.flatMap((trace) => normalizeSpans(trace))
     );
 
-    // El canal se usa para elegir la traza candidata, no para recortar sus hijos.
-    // Muchas utilities JDBC/API/Mongo no traen channel-code propio.
-    return normalized;
+    const channelCodes = getSelectedChannelCodes(filters);
+
+    if (!channelCodes.length) {
+      return normalized;
+    }
+
+    const exactMatches = normalized.filter((span) => {
+      const channelCode =
+        String(span.channelCode ?? "").trim() ||
+        String(span.properties?.["channel-code"] ?? "").trim() ||
+        String(span.properties?.channelCode ?? "").trim();
+
+      return channelCodes.includes(channelCode);
+    });
+
+    return exactMatches.length ? exactMatches : normalized;
   }
 
   const hintSpan = await searchBestSpan(
@@ -2617,10 +2541,22 @@ export async function fetchSpans(
   }
 
   const normalized = normalizeSpans(trace);
+  const channelCodes = getSelectedChannelCodes(filters);
 
-  // No filtrar los spans hijos por channel-code: eso sesga y deja incompleta
-  // la traza porque el canal suele existir únicamente en el span padre.
-  return normalized;
+  if (!channelCodes.length) {
+    return normalized;
+  }
+
+  const exactMatches = normalized.filter((span) => {
+    const channelCode =
+      String(span.channelCode ?? "").trim() ||
+      String(span.properties?.["channel-code"] ?? "").trim() ||
+      String(span.properties?.channelCode ?? "").trim();
+
+    return channelCodes.includes(channelCode);
+  });
+
+  return exactMatches.length ? exactMatches : normalized;
 }
 
 export async function fetchTraceSummaryForInvokerTx(
@@ -2630,6 +2566,7 @@ export async function fetchTraceSummaryForInvokerTx(
   invokerLibraryHint?: string,
   invokerLibraryHints?: string[]
 ): Promise<string> {
+  console.info("[AWS TRACE] Motor de cálculo activo: v16-select-read-only");
   const libraryTraces = await fetchTracesByLibraries({
     filters,
     invokerTx,
@@ -2639,26 +2576,23 @@ export async function fetchTraceSummaryForInvokerTx(
   });
 
   if (libraryTraces.length > 0) {
-    const flowEntries = libraryTraces
-      .map((trace) => {
-        const entries: TraceEntry[] = [];
-        collectTraceEntries(trace, entries);
+    const flowEntries = dedupeTraceEntryFlows(
+      libraryTraces
+        .map((trace) => {
+          const entries: TraceEntry[] = [];
 
-        // La traza ya fue seleccionada usando canal/site. No recortamos
-        // utilities hijas que no tengan channel-code propio.
-        return dedupeTraceEntries(entries);
-      })
-      .filter((entries) => entries.length > 0);
+          collectTraceEntries(trace, entries);
+
+          return filterEntriesByChannel(
+            dedupeTraceEntries(entries),
+            getSelectedChannelCodes(filters)
+          );
+        })
+        .filter((entries) => entries.length > 0)
+    );
 
     if (flowEntries.length > 0) {
-      const selectedTraceDurationMs = getTraceDurationMs(
-        libraryTraces[0],
-        invokerTx
-      );
-      return buildTraceSummaryByFlows(
-        flowEntries,
-        selectedTraceDurationMs
-      );
+      return buildTraceSummaryByFlows(flowEntries, responseTimeMs);
     }
   }
 
@@ -2684,29 +2618,14 @@ export async function fetchTraceSummaryForInvokerTx(
     return "Sin trazas encontradas";
   }
 
-  const concordantTrace = selectConcordantTrace(
-    [trace],
-    invokerTx,
-    responseTimeMs
-  );
-
-  if (!concordantTrace) {
-    console.warn("[RHO] No fue posible medir concordancia; se utilizará la traza recuperada", {
-      invokerTx,
-      responseTimeMs,
-      traceDurationMs: getTraceDurationMs(trace, invokerTx),
-    });
-  }
-
-  const selectedTrace = concordantTrace ?? trace;
   const entries: TraceEntry[] = [];
 
-  collectTraceEntries(selectedTrace, entries);
+  collectTraceEntries(trace, entries);
 
-  const completeEntries = dedupeTraceEntries(entries);
-
-  return buildTraceSummary(
-    completeEntries,
-    getTraceDurationMs(selectedTrace, invokerTx)
+  const filteredEntries = filterEntriesByChannel(
+    dedupeTraceEntries(entries),
+    getSelectedChannelCodes(filters)
   );
+
+  return buildTraceSummary(filteredEntries, responseTimeMs);
 }
