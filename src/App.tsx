@@ -16,6 +16,7 @@ import MonitoreoCicsConsolaOperacionesApx from "@/pages/MonitoreoCicsConsolaOper
 import MonitoreoArbolDependencias from "@/pages/MonitoreoArbolDependencias";
 import RelacionCanalesWork from "@/pages/RelacionCanalesWork";
 import LogsAtenea from "@/pages/LogsAtenea";
+import DescargaConsolaOperaciones from "@/pages/DescargaConsolaOperaciones";
 import Fresno from "@/pages/Fresno";
 import NotFound from "@/pages/NotFound";
 
@@ -102,6 +103,15 @@ function AppShell() {
           element={
             <ProtectedRoute>
               <LogsAtenea />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/monitoreo/descarga-consola-operaciones"
+          element={
+            <ProtectedRoute>
+              <DescargaConsolaOperaciones />
             </ProtectedRoute>
           }
         />

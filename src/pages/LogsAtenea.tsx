@@ -1,7 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
   Braces,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
   ClipboardCopy,
   Download,
   Eye,
@@ -58,6 +62,8 @@ const ENVIRONMENTS: AteneaLogsEnvironment[] = ["DEV", "INT", "AUS", "OCT", "PRO"
 const NAMESPACES: AteneaLogsNamespace[] = ["apx.batch", "apx.online"];
 const ALL_EXIT_CODES = "ALL";
 const MESSAGE_PREVIEW_MAX_CHARS = 900;
+const DEFAULT_TABLE_PAGE_SIZE = 100;
+const TABLE_PAGE_SIZE_OPTIONS = [25, 50, 100, 250];
 
 type ResultTab = "logs" | "spans";
 type SpanViewMode = "spanId" | "trxJob";
@@ -278,13 +284,112 @@ function getLevelBadgeClass(level: string): string {
   return "border-slate-500/20 bg-slate-500/10 text-slate-700 dark:text-slate-300";
 }
 
+interface ResultPaginationProps {
+  page: number;
+  pageSize: number;
+  totalRows: number;
+  onPageChange: (page: number) => void;
+  onPageSizeChange: (pageSize: number) => void;
+}
+
+function ResultPagination({
+  page,
+  pageSize,
+  totalRows,
+  onPageChange,
+  onPageSizeChange,
+}: ResultPaginationProps) {
+  const totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
+  const safePage = Math.min(Math.max(1, page), totalPages);
+  const firstRow = totalRows ? (safePage - 1) * pageSize + 1 : 0;
+  const lastRow = Math.min(safePage * pageSize, totalRows);
+
+  return (
+    <div className="flex flex-col gap-3 border-t border-border bg-muted/10 px-5 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="text-xs text-muted-foreground">
+        {totalRows
+          ? `Mostrando ${firstRow.toLocaleString("es-MX")}-${lastRow.toLocaleString("es-MX")} de ${totalRows.toLocaleString("es-MX")}`
+          : "Sin filas para mostrar"}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-muted-foreground">Filas</span>
+        <Select
+          value={String(pageSize)}
+          onValueChange={(value) => onPageSizeChange(Number(value))}
+        >
+          <SelectTrigger className="h-8 w-[84px] rounded-lg font-mono text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {TABLE_PAGE_SIZE_OPTIONS.map((option) => (
+              <SelectItem key={option} value={String(option)}>
+                {option}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        <span className="min-w-[110px] text-center font-mono text-xs text-muted-foreground">
+          Página {safePage.toLocaleString("es-MX")} / {totalPages.toLocaleString("es-MX")}
+        </span>
+
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          className="h-8 w-8"
+          disabled={safePage <= 1}
+          onClick={() => onPageChange(1)}
+          aria-label="Primera página"
+        >
+          <ChevronsLeft className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          className="h-8 w-8"
+          disabled={safePage <= 1}
+          onClick={() => onPageChange(safePage - 1)}
+          aria-label="Página anterior"
+        >
+          <ChevronLeft className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          className="h-8 w-8"
+          disabled={safePage >= totalPages}
+          onClick={() => onPageChange(safePage + 1)}
+          aria-label="Página siguiente"
+        >
+          <ChevronRight className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          className="h-8 w-8"
+          disabled={safePage >= totalPages}
+          onClick={() => onPageChange(totalPages)}
+          aria-label="Última página"
+        >
+          <ChevronsRight className="h-4 w-4" />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export default function LogsAtenea() {
   const { bearerToken, setBearerToken } = useBearerToken();
 
   const [environment, setEnvironment] = useState<AteneaLogsEnvironment>("INT");
   const [namespace, setNamespace] = useState<AteneaLogsNamespace>("apx.batch");
-  const [messageRegex, setMessageRegex] = useState(
-    "InvoicesTransactionInvoicesTransactionV0",
+  const [message, setMessage] = useState(
+    "InvoicesTransaction*V0",
   );
   const [fromDate, setFromDate] = useState<Date>(getDefaultFromDate);
   const [toDate, setToDate] = useState<Date>(getDefaultToDate);
@@ -299,6 +404,9 @@ export default function LogsAtenea() {
   const [progress, setProgress] = useState<AteneaLogsProgress | null>(null);
   const [result, setResult] = useState<AteneaLogsSearchResult | null>(null);
   const [error, setError] = useState("");
+  const [tablePageSize, setTablePageSize] = useState(DEFAULT_TABLE_PAGE_SIZE);
+  const [logsPage, setLogsPage] = useState(1);
+  const [spansPage, setSpansPage] = useState(1);
 
   const exitCodeOptions = useMemo(() => {
     const common = ["FAILED", "SUCCESS", "COMPLETED", "OK", "ERROR"];
@@ -340,6 +448,38 @@ export default function LogsAtenea() {
     return Array.from(byTrxJob.values());
   }, [visibleRows, spanViewMode]);
 
+  const logsTotalPages = Math.max(1, Math.ceil(visibleRows.length / tablePageSize));
+  const spansTotalPages = Math.max(1, Math.ceil(uniqueSpanRows.length / tablePageSize));
+  const safeLogsPage = Math.min(logsPage, logsTotalPages);
+  const safeSpansPage = Math.min(spansPage, spansTotalPages);
+
+  const pagedVisibleRows = useMemo(() => {
+    const start = (safeLogsPage - 1) * tablePageSize;
+    return visibleRows.slice(start, start + tablePageSize);
+  }, [safeLogsPage, tablePageSize, visibleRows]);
+
+  const pagedUniqueSpanRows = useMemo(() => {
+    const start = (safeSpansPage - 1) * tablePageSize;
+    return uniqueSpanRows.slice(start, start + tablePageSize);
+  }, [safeSpansPage, tablePageSize, uniqueSpanRows]);
+
+  useEffect(() => {
+    setLogsPage(1);
+    setSpansPage(1);
+  }, [exitCode, tablePageSize]);
+
+  useEffect(() => {
+    setSpansPage(1);
+  }, [spanViewMode]);
+
+  useEffect(() => {
+    setLogsPage((current) => Math.min(current, logsTotalPages));
+  }, [logsTotalPages]);
+
+  useEffect(() => {
+    setSpansPage((current) => Math.min(current, spansTotalPages));
+  }, [spansTotalPages]);
+
   const progressValue = useMemo(() => {
     if (!progress) return 0;
     if (progress.phase === "omega") return 12;
@@ -353,8 +493,13 @@ export default function LogsAtenea() {
   const handleSearch = async () => {
     setError("");
 
-    if (!messageRegex.trim()) {
-      setError("Escribe un mensaje, palabra o expresión regular.");
+    if (!message.trim()) {
+      setError("Escribe el message que quieres buscar en Omega.");
+      return;
+    }
+
+    if (!bearerToken.trim()) {
+      setError("Bearer Token es requerido para consultar Omega y Rho.");
       return;
     }
 
@@ -367,6 +512,8 @@ export default function LogsAtenea() {
     setResult(null);
     setActiveTab("logs");
     setExitCode(ALL_EXIT_CODES);
+    setLogsPage(1);
+    setSpansPage(1);
     setProgress({
       phase: "omega",
       completed: 0,
@@ -378,7 +525,7 @@ export default function LogsAtenea() {
       const response = await fetchAteneaLogs({
         environment,
         namespace,
-        messageRegex,
+        message,
         fromDate,
         toDate,
         bearerToken,
@@ -457,8 +604,8 @@ export default function LogsAtenea() {
               <div>
                 <h2 className="text-2xl font-bold tracking-tight">LOGS ATENEA</h2>
                 <p className="mt-1 max-w-4xl text-sm text-muted-foreground">
-                  Busca todos los mensajes relacionados en Omega recorriendo todas sus páginas y resuelve cada spanId en Rho para obtener
-                  TRX/JOB, applicationUUAA, Env y Exit Code.
+                  Consulta Omega con la misma paginación por page/size usada en Securización Live y resuelve cada spanId en Rho para obtener
+                  TRX/JOB, applicationUUAA, Env y Exit Code. El message de Omega es editable.
                 </p>
               </div>
             </div>
@@ -471,7 +618,7 @@ export default function LogsAtenea() {
                 Rho Spans
               </Badge>
               <Badge variant="outline" className="rounded-full px-3 py-1">
-                Regex
+                Message editable
               </Badge>
               <Badge variant="outline" className="rounded-full px-3 py-1">
                 Paginación completa
@@ -550,20 +697,20 @@ export default function LogsAtenea() {
 
           <div className="grid gap-4 xl:grid-cols-[1.6fr_1fr]">
             <div className="space-y-2">
-              <Label>Message / Regex</Label>
+              <Label>Message de Omega</Label>
               <div className="relative">
                 <Braces className="absolute left-3 top-3.5 h-4 w-4 text-muted-foreground" />
                 <Input
-                  value={messageRegex}
-                  onChange={(event) => setMessageRegex(event.target.value)}
+                  value={message}
+                  onChange={(event) => setMessage(event.target.value)}
                   disabled={loading}
-                  placeholder="InvoicesTransaction.*V0"
+                  placeholder="InvoicesTransaction*V0"
                   className="h-11 rounded-xl pl-10 font-mono text-xs"
                 />
               </div>
               <p className="text-xs text-muted-foreground">
-                Escribe directamente el mensaje, palabra o regex a localizar. Ejemplo:
-                InvoicesTransaction.*V0
+                Escribe el patrón de <span className="font-mono">message</span> que se enviará a Omega.
+                Usa <span className="font-mono">*</span> como wildcard. Ejemplo: <span className="font-mono">InvoicesTransaction*V0</span>.
               </p>
             </div>
 
@@ -610,7 +757,7 @@ export default function LogsAtenea() {
             <Button
               type="button"
               onClick={handleSearch}
-              disabled={loading || !messageRegex.trim()}
+              disabled={loading || !message.trim() || !bearerToken.trim()}
               className="h-11 rounded-xl px-6"
             >
               {loading ? (
@@ -655,6 +802,12 @@ export default function LogsAtenea() {
                 </div>
                 <div className="mt-2 text-3xl font-bold">
                   {result.omegaLogsRead.toLocaleString("es-MX")}
+                </div>
+                <div className="mt-1 text-[11px] text-muted-foreground">
+                  {result.omegaPagesRead.toLocaleString("es-MX")} página(s)
+                  {result.omegaTotalElements !== undefined
+                    ? ` · ${result.omegaTotalElements.toLocaleString("es-MX")} reportados`
+                    : ""}
                 </div>
               </CardContent>
             </Card>
@@ -849,7 +1002,7 @@ export default function LogsAtenea() {
                     </TableHeader>
                     <TableBody>
                       {visibleRows.length ? (
-                        visibleRows.map((row, index) => {
+                        pagedVisibleRows.map((row, index) => {
                           const preview = getMessagePreview(row.message);
 
                           return (
@@ -962,6 +1115,13 @@ export default function LogsAtenea() {
                     </TableBody>
                   </Table>
                 </div>
+                <ResultPagination
+                  page={safeLogsPage}
+                  pageSize={tablePageSize}
+                  totalRows={visibleRows.length}
+                  onPageChange={setLogsPage}
+                  onPageSizeChange={setTablePageSize}
+                />
               </TabsContent>
 
               <TabsContent value="spans" className="m-0">
@@ -982,7 +1142,7 @@ export default function LogsAtenea() {
                     </TableHeader>
                     <TableBody>
                       {uniqueSpanRows.length ? (
-                        uniqueSpanRows.map((row, index) => {
+                        pagedUniqueSpanRows.map((row, index) => {
                           const preview = getMessagePreview(row.message);
 
                           return (
@@ -1073,6 +1233,13 @@ export default function LogsAtenea() {
                     </TableBody>
                   </Table>
                 </div>
+                <ResultPagination
+                  page={safeSpansPage}
+                  pageSize={tablePageSize}
+                  totalRows={uniqueSpanRows.length}
+                  onPageChange={setSpansPage}
+                  onPageSizeChange={setTablePageSize}
+                />
               </TabsContent>
             </Tabs>
           </section>

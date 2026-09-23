@@ -22,6 +22,7 @@ type HeaderRoute =
   | "arbol-dependencias"
   | "relacion-canales-work"
   | "logs-atenea"
+  | "descarga-consola-operaciones"
   | "fresno";
 
 const ROUTES: Array<{ value: HeaderRoute; label: string; path: string }> = [
@@ -62,6 +63,11 @@ const ROUTES: Array<{ value: HeaderRoute; label: string; path: string }> = [
     path: "/monitoreo/logs-atenea",
   },
   {
+    value: "descarga-consola-operaciones",
+    label: "Descarga Consola de Operaciones",
+    path: "/monitoreo/descarga-consola-operaciones",
+  },
+  {
     value: "fresno",
     label: "Consultar Fresno",
     path: "/fresno",
@@ -70,6 +76,9 @@ const ROUTES: Array<{ value: HeaderRoute; label: string; path: string }> = [
 
 function getRouteValue(pathname: string): HeaderRoute {
   if (pathname.startsWith("/fresno")) return "fresno";
+  if (pathname.startsWith("/monitoreo/descarga-consola-operaciones")) {
+    return "descarga-consola-operaciones";
+  }
   if (pathname.startsWith("/monitoreo/logs-atenea")) return "logs-atenea";
   if (pathname.startsWith("/monitoreo/relacion-canales-work")) {
     return "relacion-canales-work";
