@@ -33,7 +33,7 @@ function buildRhoScopeFilter(filters: MetricsFilters): string | undefined {
     ? `properties.site == "${filters.site.trim()}"`
     : undefined;
 }
-const AWS_NETWORK_CONSTANT_MS = 0.89;
+const AWS_NETWORK_CONSTANT_MS = 89;
 
 const MAX_TRACE_IDS_PER_INVOKER = 1;
 const MAX_TRACE_IDS_PER_LIBRARY = 1;
