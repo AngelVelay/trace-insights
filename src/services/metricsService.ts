@@ -17,15 +17,14 @@ import {
   buildChannelCodeFilter,
 } from "./urlBuilder";
 import {
-  apiRequest,
+  apiRequestWithRetry,
   buildAuthHeaders,
   createConcurrencyLimiter,
 } from "./httpClient";
 
 import {
   fetchTraceSummaryForInvokerTx,
-  fetchMetadataForInvokerTx,
-  fetchTraceChannelsForInvokerTx,
+  fetchDashboardRhoSnapshot,
 } from "./tracesService";
 
 
@@ -104,7 +103,21 @@ export interface AwsInformComparisonResult {
 function extractBuckets(
   res: AggregationResponse & { buckets?: AggregationBucket[] }
 ): AggregationBucket[] {
-  return res.buckets ?? res.data ?? res.aggregations ?? [];
+  // Un arreglo vacío no debe ocultar otra colección con resultados válidos.
+  const candidates = [res.buckets, res.data, res.aggregations].filter(
+    (value): value is AggregationBucket[] => Array.isArray(value),
+  );
+  return candidates.find((items) => items.length > 0) ?? candidates[0] ?? [];
+}
+
+/**
+ * MU puede omitir métricas cuando no hay muestras. No transformar la ausencia
+ * en 0 ms, porque una duración ausente no equivale a una duración de cero.
+ */
+function parseUtilityDuration(value: unknown): number | null {
+  if (value === undefined || value === null || String(value).trim() === "") return null;
+  const duration = Number(value);
+  return Number.isFinite(duration) && duration >= 0 ? duration : null;
 }
 
 async function fetchAggregation(
@@ -145,7 +158,7 @@ async function fetchAggregation(
   });
 
   const res = await limiter(() =>
-    apiRequest<AggregationResponse & { buckets?: AggregationBucket[] }>(url, {
+    apiRequestWithRetry<AggregationResponse & { buckets?: AggregationBucket[] }>(url, {
       headers: buildAuthHeaders(filters.bearerToken),
     })
   );
@@ -219,15 +232,7 @@ function buildSingleInvokerTxFilters(
   };
 }
 
-function removeChannelCodeFilter(filters: MetricsFilters): MetricsFilters {
-  return {
-    ...filters,
-    channelCode: undefined,
-    channelCodes: undefined,
-  };
-}
-
-async function fetchAggregationWithChannelFallback(
+async function fetchAggregationForSelectedChannel(
   filters: MetricsFilters,
   metricSet:
     | "technical-dashboard"
@@ -254,21 +259,12 @@ async function fetchAggregationWithChannelFallback(
     return result;
   }
 
+  // No mezclar métricas de otros canales: un resultado sin filtro no pertenece
+  // necesariamente al canal solicitado. Es preferible un vacío verificable.
   console.warn(
-    `[metricsService] ${metricSet}/${aggregate} vino vacío con channel-code=${getSelectedChannelCodes(
-      filters
-    ).join(", ")}. Reintentando sin channel-code.`
+    `[metricsService] ${metricSet}/${aggregate}: MU no devolvió datos para channel-code=${getSelectedChannelCodes(filters).join(", ")}; no se amplió la búsqueda a otros canales.`
   );
-
-  const fallbackFilters = removeChannelCodeFilter(filters);
-
-  return fetchAggregation(
-    fallbackFilters,
-    metricSet,
-    aggregate,
-    operations,
-    buildQuery(fallbackFilters)
-  );
+  return result;
 }
 
 export async function fetchInvokerTxBuckets(
@@ -298,7 +294,7 @@ export async function fetchInvokerLibraryBuckets(
   filters: MetricsFilters,
   invokerTx: string
 ): Promise<AggregationBucket[]> {
-  return fetchAggregationWithChannelFallback(
+  return fetchAggregationForSelectedChannel(
     filters,
     "utility-metric-set",
     "invokerLibrary",
@@ -317,7 +313,7 @@ export async function fetchUtilityTypeBuckets(
   invokerTx: string,
   invokerLibrary: string
 ): Promise<AggregationBucket[]> {
-  return fetchAggregationWithChannelFallback(
+  return fetchAggregationForSelectedChannel(
     filters,
     "utility-metric-set",
     "utilitytype",
@@ -343,7 +339,7 @@ export async function fetchInvokedParamBuckets(
 ): Promise<AggregationBucket[]> {
   const selectedUtilityType = filters.utilityType || utilitytype;
 
-  return fetchAggregationWithChannelFallback(
+  return fetchAggregationForSelectedChannel(
     filters,
     "utility-metric-set",
     "invokedparam",
@@ -779,7 +775,7 @@ async function fetchFullMetricsSingleChannel(
       meta: {
         invokerTx: String(bucket.bucket?.name ?? "").trim(),
         sum_num_executions: Number(bucket.values?.sum_num_executions ?? 0),
-        mean_span_duration: Number(bucket.values?.mean_span_duration ?? 0),
+        mean_span_duration: parseUtilityDuration(bucket.values?.mean_span_duration),
         sum_functional_error: Number(bucket.values?.sum_functional_error ?? 0),
         sum_technical_error: Number(bucket.values?.sum_technical_error ?? 0),
       },
@@ -853,7 +849,9 @@ async function fetchFullMetricsSingleChannel(
       utilitytype: string;
       invokedparam: string;
       count: number;
-      maxDuration: number;
+      maxDuration: number | null;
+      avgDuration: number | null;
+      minDuration: number | null;
     }> = [];
 
     for (const library of libraries) {
@@ -903,7 +901,9 @@ async function fetchFullMetricsSingleChannel(
               ""
             ).trim(),
             count: Number(bucket.values?.count_utility_count ?? 0),
-            maxDuration: Number(bucket.values?.max_utility_duration ?? 0),
+            maxDuration: parseUtilityDuration(bucket.values?.max_utility_duration),
+            avgDuration: parseUtilityDuration(bucket.values?.mean_utility_duration),
+            minDuration: parseUtilityDuration(bucket.values?.min_utility_duration),
           }))
           .filter((item) => item.invokedparam.length > 0);
 
@@ -932,29 +932,22 @@ async function fetchFullMetricsSingleChannel(
       invokerLibraryHintsForTrace,
     });
 
-    const trace = await fetchTraceSummaryForInvokerTx(
-      baseFilters,
+    // Trace, canales y metadatos proceden de UNA ejecución RHO representativa.
+    // Un timeout de RHO no debe perder invokerTx/invokedParams ya leídos de MU.
+    const metricChannel = String(txRow.channelCode ?? "").trim();
+    const scopedRhoFilters = metricChannel && metricChannel !== "-"
+      ? { ...baseFilters, channelCode: metricChannel, channelCodes: undefined }
+      : baseFilters;
+    const rhoSnapshot = await fetchDashboardRhoSnapshot(
+      scopedRhoFilters,
       txMeta.invokerTx,
       responseTimeMs,
-      selectedInvokerLibraryForTrace,
-      invokerLibraryHintsForTrace
+      invokerLibraryHintsForTrace,
     );
-
-    const rhoMetadata = await fetchMetadataForInvokerTx(
-      baseFilters,
-      txMeta.invokerTx,
-      responseTimeMs,
-      selectedInvokerLibraryForTrace,
-      invokerLibraryHintsForTrace
-    );
-
-    const rhoChannels = await fetchTraceChannelsForInvokerTx(
-      baseFilters,
-      txMeta.invokerTx,
-      responseTimeMs,
-      selectedInvokerLibraryForTrace,
-      invokerLibraryHintsForTrace
-    );
+    const { trace, metadata: rhoMetadata, channels: rhoChannels } = rhoSnapshot;
+    if (rhoSnapshot.warning) {
+      onProgress?.(`MU recuperado para ${txMeta.invokerTx}; estado Rho: ${rhoSnapshot.warning}`);
+    }
 
     const searchedChannelCode =
       String(txRow.channelCode ?? "").trim() ||

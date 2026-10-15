@@ -6,13 +6,15 @@ import type {
   MetricsFilters,
 } from "@/types/bbva";
 import { dateRangeToNano } from "./dateUtils";
+import { readTraceSpanDurationMs, readTraceTransactionDurationMs } from "./traceDuration";
 import {
-  apiRequest,
+  apiRequestWithRetry,
   buildAuthHeaders,
   createConcurrencyLimiter,
 } from "./httpClient";
 
 const RHO_LIVE_BASE = "https://rho.live-02.nextgen.igrupobbva";
+const RHO_LIVE_04_BASE = "https://rho.live-04.nextgen.igrupobbva";
 const RHO_WORK_BASE = "https://rho.work-02.nextgen.igrupobbva";
 
 function isWorkSite(site?: string): boolean {
@@ -20,12 +22,32 @@ function isWorkSite(site?: string): boolean {
 }
 
 function getRhoBaseUrl(site?: string): string {
-  return isWorkSite(site) ? RHO_WORK_BASE : RHO_LIVE_BASE;
+  if (isWorkSite(site)) return RHO_WORK_BASE;
+  return String(site ?? "").trim().toUpperCase() === "LIVE-04" ? RHO_LIVE_04_BASE : RHO_LIVE_BASE;
+}
+
+/**
+ * En Vite usamos el mismo proxy RHO que Monitoreo Logs Omega. Las peticiones
+ * cross-origin directas pueden fallar por CORS aunque el token sea correcto.
+ * En despliegues que no sean localhost se conserva el host RHO original.
+ */
+function buildRhoUrl(path: string, site?: string): URL {
+  if (typeof window !== "undefined" && /^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname)) {
+    const normalizedSite = String(site ?? "").trim().toUpperCase();
+    const prefix = isWorkSite(site) ? "/rho-work-02" : normalizedSite === "LIVE-04" ? "/rho-live-04" : "/rho-live-02";
+    return new URL(`${prefix}${path}`, window.location.origin);
+  }
+  return new URL(path, getRhoBaseUrl(site));
+}
+
+function normalizeRhoEnvironment(value?: string): string {
+  const normalized = String(value ?? "").trim().toUpperCase();
+  return normalized === "OCT" ? "OCTA" : normalized;
 }
 
 function buildRhoScopeFilter(filters: MetricsFilters): string | undefined {
   if (isWorkSite(filters.site)) {
-    const environment = filters.environment?.trim().toUpperCase();
+    const environment = normalizeRhoEnvironment(filters.environment);
     return environment ? `properties.env == "${environment}"` : undefined;
   }
 
@@ -33,7 +55,7 @@ function buildRhoScopeFilter(filters: MetricsFilters): string | undefined {
     ? `properties.site == "${filters.site.trim()}"`
     : undefined;
 }
-const AWS_NETWORK_CONSTANT_MS = 89;
+const AWS_NETWORK_CONSTANT_MS = 89; // Milisegundos por salto a AWS.
 
 const MAX_TRACE_IDS_PER_INVOKER = 1;
 const MAX_TRACE_IDS_PER_LIBRARY = 1;
@@ -44,6 +66,15 @@ const traceLimiter = createConcurrencyLimiter(3);
 const traceCache = new Map<string, RawSpan>();
 const rootSpanCache = new Map<string, string>();
 
+function putBoundedCache<T>(cache: Map<string, T>, key: string, value: T, maxEntries: number): void {
+  cache.delete(key);
+  cache.set(key, value);
+  if (cache.size > maxEntries) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+}
+
 export type TraceSpanMetadata = {
   channelCode?: string;
   aap?: string;
@@ -53,6 +84,8 @@ export type TraceSpanMetadata = {
 };
 
 type TraceEntry = {
+  spanId: string;
+  traceId: string;
   utilitytype: string;
   declaredUtilityType: string;
   invokerLibrary: string;
@@ -61,7 +94,7 @@ type TraceEntry = {
   databaseQuery: string;
   databaseInstance: string;
   collection: string;
-  durationMs: number;
+  durationMs: number | null;
   channelCode: string;
   startOrder: number | null;
   sequence: number;
@@ -83,6 +116,12 @@ export type TraceChannelMetadata = {
 
 
 type RhoSpanDetailResponse = RawSpan | Record<string, unknown>;
+
+/** 1 y 01 representan el mismo canal; no alterar el valor enviado a la API. */
+function canonicalChannelCode(value: unknown): string {
+  const code = String(value ?? "").trim().toUpperCase();
+  return /^\d{1,2}$/.test(code) ? code.padStart(2, "0") : code;
+}
 
 function getSelectedChannelCodes(filters: MetricsFilters): string[] {
   const codes = filters.channelCodes?.length
@@ -151,48 +190,28 @@ function dedupeTraceChannels(
 }
 
 function getCacheScope(filters: MetricsFilters, invokerTx: string): string {
+  // Sin fechas ni sesión en la clave se devolvían traces antiguos al cambiar
+  // de rango o credenciales. Solo guardamos una huella del token, nunca el token.
+  const token = filters.bearerToken ?? "";
+  let authHash = 2166136261;
+  for (let i = 0; i < token.length; i += 1) {
+    authHash = Math.imul(authHash ^ token.charCodeAt(i), 16777619);
+  }
   return [
     filters.site ?? "",
     filters.environment ?? "",
+    filters.fromDate instanceof Date ? filters.fromDate.getTime() : String(filters.fromDate),
+    filters.toDate instanceof Date ? filters.toDate.getTime() : String(filters.toDate),
+    authHash >>> 0,
     getSelectedChannelCodes(filters).join(","),
     invokerTx,
   ].join("|");
 }
 
 function normalizeDuration(span: RawSpan): number {
-  /*
-   * Preferimos startDate/finishDate cuando RHO los entrega porque así evitamos
-   * interpretar incorrectamente la unidad de `duration`. La magnitud del
-   * timestamp permite distinguir ns/us/ms/s.
-   */
-  if (
-    typeof span.startDate === "number" &&
-    typeof span.finishDate === "number" &&
-    Number.isFinite(span.startDate) &&
-    Number.isFinite(span.finishDate) &&
-    span.finishDate >= span.startDate
-  ) {
-    const diff = span.finishDate - span.startDate;
-    const magnitude = Math.max(Math.abs(span.startDate), Math.abs(span.finishDate));
-
-    if (magnitude >= 1e17) return diff / 1_000_000; // nanosegundos -> ms
-    if (magnitude >= 1e14) return diff / 1_000;     // microsegundos -> ms
-    if (magnitude >= 1e11) return diff;             // milisegundos
-    if (magnitude >= 1e9) return diff * 1_000;       // segundos -> ms
-  }
-
-  if (typeof span.duration === "number" && Number.isFinite(span.duration)) {
-    const d = span.duration;
-
-    // Compatibilidad con el formato habitual de RHO/APX.
-    if (d >= 1_000_000) return d / 1_000_000;
-    if (d >= 1_000) return d / 1_000;
-    if (d > 0 && d < 1) return d * 1_000;
-
-    return Math.max(0, d);
-  }
-
-  return 0;
+  // Se conserva un número para las clasificaciones/ordenaciones existentes.
+  // En el resumen de AWS se usa readTraceSpanDurationMs para distinguir N/D de 0.
+  return readTraceSpanDurationMs(span) ?? 0;
 }
 
 function inferUtilityType(span: RawSpan): string {
@@ -482,10 +501,7 @@ function buildRhoSpanSearchUrl(params: {
 
   const q = filters.join(" and ");
 
-  const url = new URL(
-    "/v1/ns/apx.online/spans",
-    getRhoBaseUrl(baseSite ?? site)
-  );
+  const url = buildRhoUrl("/v1/ns/apx.online/spans", baseSite ?? site);
 
   url.searchParams.set("q", q);
   url.searchParams.set("sort", "ascending");
@@ -496,6 +512,7 @@ function buildRhoSpanSearchUrl(params: {
     [
       "channel-code",
       "channelCode",
+      "type",
       "environ-code",
       "env",
       "product-code",
@@ -525,9 +542,9 @@ function buildRhoTraceUrl(params: {
 }): string {
   const { spanId, fromDate, toDate, site } = params;
 
-  const url = new URL(
-    `/v1/ns/apx.online/mrs/RhoTraces/spans/${spanId}:trace`,
-    getRhoBaseUrl(site)
+  const url = buildRhoUrl(
+    `/v1/ns/apx.online/mrs/RhoTraces/spans/${encodeURIComponent(spanId)}:trace`,
+    site
   );
 
   url.searchParams.set("fromDate", fromDate);
@@ -546,9 +563,9 @@ function buildRhoSpanDetailUrl(params: {
 }): string {
   const { spanId, fromDate, toDate, site } = params;
 
-  const url = new URL(
-    `/v1/ns/apx.online/mrs/RhoTraces/spans/${spanId}`,
-    getRhoBaseUrl(site)
+  const url = buildRhoUrl(
+    `/v1/ns/apx.online/mrs/RhoTraces/spans/${encodeURIComponent(spanId)}`,
+    site
   );
 
   url.searchParams.set("profile", "default");
@@ -558,49 +575,30 @@ function buildRhoSpanDetailUrl(params: {
   return url.toString();
 }
 
-function isRawSpan(value: unknown): value is RawSpan {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-
-  const candidate = value as Partial<RawSpan>;
-
-  return Boolean(
-    candidate.properties ||
-    candidate.spanId ||
-    candidate.traceId ||
-    candidate.name
-  );
-}
-
 function unwrapRhoSpanDetail(response: RhoSpanDetailResponse): RawSpan | null {
-  if (!response || typeof response !== "object") {
+  const visit = (value: unknown, depth: number): RawSpan | null => {
+    if (!value || typeof value !== "object" || depth > 5) return null;
+    if (Array.isArray(value)) {
+      const roots = value.map((row) => visit(row, depth + 1)).filter((root): root is RawSpan => root !== null);
+      if (roots.length === 1) return roots[0];
+      // Algunas versiones de Rho devuelven data[] con varios nodos raíz.
+      // No descartar todos menos el primero: perdíamos Transaction y utilidades.
+      return roots.length ? { children: roots } : null;
+    }
+    const row = value as Record<string, unknown>;
+    const identity = [row.spanId, row.traceId, row.name].some(
+      (v) => typeof v === "string" && v.trim(),
+    );
+    if (identity || Array.isArray(row.children)) return row as RawSpan;
+    for (const key of ["data", "span", "item", "trace", "root", "result", "spans", "items", "content"]) {
+      if (key in row) {
+        const candidate = visit(row[key], depth + 1);
+        if (candidate) return candidate;
+      }
+    }
     return null;
-  }
-
-  if (isRawSpan(response)) {
-    return response;
-  }
-
-  const wrapper = response as {
-    data?: unknown;
-    span?: unknown;
-    item?: unknown;
   };
-
-  if (isRawSpan(wrapper.data)) {
-    return wrapper.data;
-  }
-
-  if (isRawSpan(wrapper.span)) {
-    return wrapper.span;
-  }
-
-  if (isRawSpan(wrapper.item)) {
-    return wrapper.item;
-  }
-
-  return null;
+  return visit(response, 0);
 }
 
 function collectChannelMetadataFromTrace(
@@ -655,48 +653,13 @@ export async function fetchTraceChannelsForInvokerTx(
   invokerLibraryHint?: string,
   invokerLibraryHints?: string[]
 ): Promise<TraceChannelMetadata[]> {
-  const libraryTraces = await fetchTracesByLibraries({
-    filters,
-    invokerTx,
-    responseTimeMs,
-    invokerLibraryHint,
-    invokerLibraryHints,
-  });
-
-  const channels: TraceChannelMetadata[] = [];
-
-  if (libraryTraces.length > 0) {
-    for (const trace of libraryTraces) {
-      collectChannelMetadataFromTrace(trace, channels);
-    }
-
-    return dedupeTraceChannels(channels);
-  }
-
-  const hintSpan = await searchBestSpan(
-    filters,
-    invokerTx,
-    responseTimeMs,
-    invokerLibraryHint
+  // El mismo snapshot que usa Dashboard; evita búsquedas RHO adicionales con
+  // filtros de canal/sitio que no existen en cada nodo de la traza.
+  const snapshot = await fetchDashboardRhoSnapshot(
+    filters, invokerTx, responseTimeMs,
+    [invokerLibraryHint, ...(invokerLibraryHints ?? [])].filter((hint): hint is string => Boolean(hint)),
   );
-
-  if (!hintSpan?.spanId) {
-    return [];
-  }
-
-  const trace = await fetchFullTraceByHintSpan({
-    filters,
-    invokerTx,
-    hintSpan,
-  });
-
-  if (!trace) {
-    return [];
-  }
-
-  collectChannelMetadataFromTrace(trace, channels);
-
-  return dedupeTraceChannels(channels);
+  return snapshot.channels;
 }
 
 export async function fetchTraceSpanMetadata(
@@ -721,7 +684,7 @@ export async function fetchTraceSpanMetadata(
     url,
   });
 
-  const response = await apiRequest<RhoSpanDetailResponse>(url, {
+  const response = await apiRequestWithRetry<RhoSpanDetailResponse>(url, {
     headers: buildAuthHeaders(filters.bearerToken),
   });
 
@@ -822,7 +785,7 @@ async function searchBestSpan(
       url,
     });
 
-    const res = await apiRequest<SpansPaginatedResponse>(url, { headers });
+    const res = await apiRequestWithRetry<SpansPaginatedResponse>(url, { headers });
     const items = Array.isArray(res.data) ? res.data : [];
 
     const best = sortSpansByDurationTarget(
@@ -897,9 +860,10 @@ async function searchBestSpan(
 
 const strictChannel = shouldUseStrictChannel(filters);
 
-const filteredAttempts = strictChannel
-  ? attempts.filter((attempt) => attempt.useChannelFilter)
-  : attempts;
+const strictSite = Boolean(filters.site) && !isWorkSite(filters.site);
+const filteredAttempts = attempts.filter(
+  (attempt) => (!strictChannel || attempt.useChannelFilter) && (!strictSite || attempt.useSiteFilter)
+);
 
 for (const attempt of filteredAttempts) {
   const span = await search(attempt);
@@ -972,7 +936,7 @@ async function searchSpansByLibraries(
       url,
     });
 
-    const res = await apiRequest<SpansPaginatedResponse>(url, { headers });
+    const res = await apiRequestWithRetry<SpansPaginatedResponse>(url, { headers });
     const items = Array.isArray(res.data) ? res.data : [];
 
     return sortSpansByDurationTarget(
@@ -1024,7 +988,11 @@ async function searchSpansByLibraries(
     },
   ];
 
-  for (const attempt of attempts) {
+  const strictSite = Boolean(filters.site) && !isWorkSite(filters.site);
+  const strictChannel = channelCodes.length > 0;
+  for (const attempt of attempts.filter((item) =>
+    (!strictSite || item.useSiteFilter) && (!strictChannel || item.useChannelFilter)
+  )) {
     const spans = await search(attempt);
 
     if (spans.length > 0) {
@@ -1040,15 +1008,12 @@ function getSpanProperty(span: RawSpan | null | undefined, key: string): string 
 }
 
 function isTransactionSpan(span: RawSpan, invokerTx: string): boolean {
-  const type = getSpanProperty(span, "type");
-  const name = String(span.name ?? "").trim();
-  const spanInvokerTx = getSpanProperty(span, "invokerTx");
-
-  return (
-    type === "Transaction" ||
-    name === invokerTx ||
-    spanInvokerTx === invokerTx
-  );
+  const type = getSpanProperty(span, "type").toUpperCase();
+  const name = String(span.name ?? "").trim().toUpperCase();
+  // Una utilidad también contiene properties.invokerTx. Esa propiedad NO
+  // convierte al hijo Jdbc/Mongo en la raíz Transaction/Job del trace.
+  return ["TRANSACTION", "TRX", "JOB", "BATCH"].includes(type) ||
+    name === invokerTx.trim().toUpperCase();
 }
 
 function hasChannelMetadata(span: RawSpan): boolean {
@@ -1123,7 +1088,7 @@ async function searchTransactionSpanIdByTraceId(params: {
   });
 
   try {
-    const res = await apiRequest<SpansPaginatedResponse>(rawUrl.toString(), {
+    const res = await apiRequestWithRetry<SpansPaginatedResponse>(rawUrl.toString(), {
       headers,
     });
 
@@ -1178,8 +1143,10 @@ async function searchRootSpanIdByTraceId(params: {
   traceId: string;
   invokerTx: string;
   fallbackSpanId: string;
+  signal?: AbortSignal;
+  quick?: boolean;
 }): Promise<string> {
-  const { filters, traceId, invokerTx, fallbackSpanId } = params;
+  const { filters, traceId, invokerTx, fallbackSpanId, signal, quick = false } = params;
   const channelCodes = getSelectedChannelCodes(filters);
 
   const cacheKey = [
@@ -1195,12 +1162,43 @@ async function searchRootSpanIdByTraceId(params: {
   }
 
   if (!USE_ROOT_SPAN_LOOKUP) {
-    rootSpanCache.set(cacheKey, fallbackSpanId);
+    putBoundedCache(rootSpanCache, cacheKey, fallbackSpanId, 250);
     return fallbackSpanId;
   }
 
   const { from, to } = dateRangeToNano(filters.fromDate, filters.toDate);
   const headers = buildAuthHeaders(filters.bearerToken);
+
+  if (quick) {
+    // Un nodo Utility no garantiza name = TRX ni channel-code; el traceId sí
+    // identifica el árbol. Buscar primero el root sin imponer propiedades.
+    const rootUrl = buildRhoUrl("/v1/ns/apx.online/spans", filters.site);
+    rootUrl.searchParams.set("q", `traceId == "${escapeRhoQueryValue(traceId)}"`);
+    rootUrl.searchParams.set("fromDate", from);
+    rootUrl.searchParams.set("toDate", to);
+    rootUrl.searchParams.set("profile", "default");
+    rootUrl.searchParams.set("size", "50");
+    rootUrl.searchParams.set("sort", "ascending");
+    try {
+      const response = await apiRequestWithRetry<SpansPaginatedResponse>(
+        rootUrl.toString(),
+        { headers, signal, timeoutMs: 5_000 },
+        1,
+      );
+      const spans = readDashboardSearchSpans(response);
+      const transaction = spans.find((span) => isTransactionSpan(span, invokerTx));
+      const root = transaction ?? (spans as SpanWithParent[]).find(isLikelyRootSpan);
+      const rootSpanId = String(root?.spanId ?? "").trim();
+      if (rootSpanId) {
+        putBoundedCache(rootSpanCache, cacheKey, rootSpanId, 250);
+        return rootSpanId;
+      }
+    } catch (error) {
+      if (signal?.aborted || isRhoAuthenticationError(error)) throw error;
+    }
+    // No prolongar por varios minutos una búsqueda rápida del Dashboard.
+    return fallbackSpanId;
+  }
 
   const search = async (params: {
     useSiteFilter: boolean;
@@ -1228,7 +1226,11 @@ async function searchRootSpanIdByTraceId(params: {
       url,
     });
 
-    const res = await apiRequest<SpansPaginatedResponse>(url, { headers });
+    const res = await apiRequestWithRetry<SpansPaginatedResponse>(
+      url,
+      { headers, signal, timeoutMs: quick ? 8_000 : 20_000 },
+      quick ? 1 : 2,
+    );
     const items = Array.isArray(res.data) ? (res.data as SpanWithParent[]) : [];
 
     if (!items.length) {
@@ -1316,15 +1318,25 @@ async function searchRootSpanIdByTraceId(params: {
     },
   ];
 
-  for (const attempt of attempts) {
+  const strictSite = Boolean(filters.site) && !isWorkSite(filters.site);
+  const permittedAttempts = attempts.filter((item) => !strictSite || item.useSiteFilter);
+  // El nodo raíz puede no tener invokerTx ni channel-code: buscarlo por traceId.
+  const quickAttempts = [{
+    useSiteFilter: Boolean(filters.site),
+    useChannelFilter: false,
+    useInvokerTxFilter: false,
+  }];
+  for (const attempt of (quick ? quickAttempts : permittedAttempts)) {
+    if (signal?.aborted) throw new DOMException("Petición cancelada", "AbortError");
     try {
       const rootSpanId = await search(attempt);
 
       if (rootSpanId) {
-        rootSpanCache.set(cacheKey, rootSpanId);
+        putBoundedCache(rootSpanCache, cacheKey, rootSpanId, 250);
         return rootSpanId;
       }
     } catch (error) {
+      if (signal?.aborted) throw error;
       console.warn("[RHO] Error buscando root span, reintentando", {
         traceId,
         invokerTx,
@@ -1334,66 +1346,88 @@ async function searchRootSpanIdByTraceId(params: {
     }
   }
 
-  rootSpanCache.set(cacheKey, fallbackSpanId);
+  // No cachear un fallback no verificado: la búsqueda pudo fallar por 503
+  // temporal y el próximo intento debe poder encontrar el root real.
   return fallbackSpanId;
 }
 
+/**
+ * Primero :trace sobre el span que Rho ya encontró. Es la misma estrategia
+ * funcional de Securización Live y evita buscar de nuevo la raíz antes de
+ * descargar. Solo en un resultado huérfano intentamos resolver el root.
+ */
 async function fetchFullTraceByHintSpan(params: {
   filters: MetricsFilters;
   invokerTx: string;
   hintSpan: RawSpan;
+  signal?: AbortSignal;
+  quick?: boolean;
 }): Promise<RawSpan | null> {
-  const { filters, invokerTx, hintSpan } = params;
-
+  const { filters, invokerTx, hintSpan, signal, quick = false } = params;
   const { from, to } = dateRangeToNano(filters.fromDate, filters.toDate);
   const headers = buildAuthHeaders(filters.bearerToken);
-
   const traceId = String(hintSpan.traceId ?? "").trim();
   const hintSpanId = String(hintSpan.spanId ?? "").trim();
-
   if (!hintSpanId) return null;
 
-  const traceCacheKey = [
-    getCacheScope(filters, invokerTx),
-    traceId || hintSpanId,
-  ].join("|");
-
+  const traceCacheKey = [getCacheScope(filters, invokerTx), traceId || hintSpanId].join("|");
   const cachedTrace = traceCache.get(traceCacheKey);
+  if (cachedTrace) return cachedTrace;
 
-  if (cachedTrace) {
-    return cachedTrace;
+  const downloadTrace = async (spanId: string): Promise<RawSpan | null> => {
+    const url = buildRhoTraceUrl({ spanId, fromDate: from, toDate: to, site: filters.site });
+    const response = await apiRequestWithRetry<RhoSpanDetailResponse>(
+      url,
+      { headers, signal, timeoutMs: quick ? 11_000 : 20_000 },
+      quick ? 1 : 2,
+    );
+    return unwrapRhoSpanDetail(response);
+  };
+
+  if (quick) {
+    let direct: RawSpan | null = null;
+    let directError: unknown;
+    try {
+      direct = await downloadTrace(hintSpanId);
+    } catch (error) {
+      if (signal?.aborted || isRhoAuthenticationError(error)) throw error;
+      directError = error;
+    }
+    // Si :trace entrega un Transaction/Job o el root con utilidades, no se
+    // necesita la búsqueda costosa /spans?traceId=... adicional.
+    const nodes = direct ? flattenSpans([direct]) : [];
+    const containsTransaction = nodes.some((node) => isTransactionSpan(node, invokerTx));
+    if (direct && (containsTransaction || !traceId || isTransactionSpan(hintSpan, invokerTx))) return direct;
+
+    // El primer intento puede devolver solo el hijo Mongo/Jdbc. Buscar el
+    // padre por traceId y volver a usar :trace con el span raíz.
+    if (traceId) {
+      const rootSpanId = await searchRootSpanIdByTraceId({
+        filters, traceId, invokerTx, fallbackSpanId: hintSpanId, signal, quick: true,
+      });
+      if (rootSpanId && rootSpanId !== hintSpanId) {
+        try {
+          const root = await downloadTrace(rootSpanId);
+          if (root) return root;
+        } catch (error) {
+          if (signal?.aborted || isRhoAuthenticationError(error)) throw error;
+          if (!direct) throw error;
+        }
+      }
+    }
+    if (direct) return direct;
+    if (directError) throw directError;
+    return null;
   }
 
-  const rootSpanId = traceId
+  const rootSpanId = traceId && !isTransactionSpan(hintSpan, invokerTx)
     ? await searchRootSpanIdByTraceId({
-      filters,
-      traceId,
-      invokerTx,
-      fallbackSpanId: hintSpanId,
+      filters, traceId, invokerTx, fallbackSpanId: hintSpanId, signal,
     })
     : hintSpanId;
-
-  const url = buildRhoTraceUrl({
-    spanId: rootSpanId,
-    fromDate: from,
-    toDate: to,
-    site: filters.site,
-  });
-
-  console.log("[RHO full trace by library span URL]", {
-    invokerTx,
-    site: filters.site,
-    channelCodes: getSelectedChannelCodes(filters),
-    traceId,
-    hintSpanId,
-    rootSpanId,
-    url,
-  });
-
-  const trace = await apiRequest<RawSpan>(url, { headers });
-
-  traceCache.set(traceCacheKey, trace);
-
+  const trace = await downloadTrace(rootSpanId);
+  if (!trace) throw new Error(`RHO devolvió :trace vacío para ${rootSpanId}`);
+  putBoundedCache(traceCache, traceCacheKey, trace, 100);
   return trace;
 }
 
@@ -1523,18 +1557,27 @@ export async function fetchMetadataForInvokerTx(
 }
 
 function getSqlMethod(databaseQuery: string): string {
-  const q = databaseQuery.trim();
-
-  if (!q) return "";
-
+  // Los SQL de RHO pueden empezar por comentarios o hints; esos prefijos no
+  // cambian la operación real que determina si es Consulta o Salto.
+  let q = databaseQuery.trim();
+  while (q) {
+    if (q.startsWith("--")) {
+      const newline = q.indexOf("\n");
+      q = newline >= 0 ? q.slice(newline + 1).trimStart() : "";
+    } else if (q.startsWith("/*")) {
+      const end = q.indexOf("*/", 2);
+      q = end >= 0 ? q.slice(end + 2).trimStart() : "";
+    } else {
+      break;
+    }
+  }
   const first = q.split(/\s+/)[0].toUpperCase();
-
   return ["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE"].includes(first)
     ? first
     : "DESCONOCIDO";
 }
 
-const JDBC_WRITE_METHODS = new Set(["INSERT", "UPDATE", "DELETE"]);
+const JDBC_WRITE_METHODS = new Set(["INSERT", "UPDATE", "DELETE", "MERGE"]);
 
 function isJdbcEntry(entry: TraceEntry): boolean {
   return String(entry.utilitytype ?? "").trim().toLowerCase() === "jdbc";
@@ -1648,8 +1691,9 @@ function getMongoOperation(item: TraceEntry): string {
   return item.invokedparam || item.name || "OPERACION";
 }
 
-function formatTraceDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) return "0ms";
+function formatTraceDuration(ms: number | null): string {
+  if (ms === null || !Number.isFinite(ms)) return "N/D";
+  if (ms <= 0) return "0ms";
 
   const seconds = Math.floor(ms / 1000);
   const remainingMs = Math.max(0, ms - seconds * 1000);
@@ -1722,7 +1766,7 @@ function collectTraceEntries(
     String(properties["channel-code"] ?? "").trim() ||
     String(properties.channelCode ?? "").trim();
 
-  const durationMs = normalizeDuration(node);
+  const durationMs = readTraceSpanDurationMs(node);
 
   const rawFingerprint = [
     utilitytype,
@@ -1745,6 +1789,8 @@ function collectTraceEntries(
     )
   ) {
     out.push({
+      spanId: String(node.spanId ?? "").trim(),
+      traceId: String(node.traceId ?? "").trim(),
       utilitytype,
       declaredUtilityType,
       invokerLibrary,
@@ -1773,13 +1819,16 @@ function filterEntriesByChannel(
     return entries;
   }
 
-  const selected = new Set(channelCodes);
+  const selected = new Set(channelCodes.map(canonicalChannelCode));
 
-  const exactMatches = entries.filter((entry) =>
-    selected.has(String(entry.channelCode ?? "").trim())
-  );
+  const identified = entries.filter((entry) => String(entry.channelCode ?? "").trim());
+  if (!identified.length) return entries;
 
-  return exactMatches.length ? exactMatches : entries;
+  const hasSelectedChannel = identified.some((entry) => selected.has(canonicalChannelCode(entry.channelCode)));
+  if (!hasSelectedChannel) return [];
+
+  // Los hijos sin channel-code son parte del trace seleccionado; no los borres.
+  return entries.filter((entry) => !entry.channelCode.trim() || selected.has(canonicalChannelCode(entry.channelCode)));
 }
 
 function dedupeTraceEntries(entries: TraceEntry[]): TraceEntry[] {
@@ -1787,19 +1836,11 @@ function dedupeTraceEntries(entries: TraceEntry[]): TraceEntry[] {
   const result: TraceEntry[] = [];
 
   for (const entry of entries) {
-    const key = [
-      entry.utilitytype,
-      entry.declaredUtilityType,
-      entry.invokerLibrary,
-      entry.invokedparam,
-      entry.databaseInstance,
-      entry.collection,
-      entry.databaseQuery,
-      entry.name,
-      entry.durationMs,
-      entry.channelCode,
-      entry.startOrder ?? "",
-    ].join("|");
+    // Dos SELECT con el mismo texto y duración pueden ser ejecuciones reales
+    // distintas. Solo fusionar si RHO certifica la misma identidad spanId.
+    const key = entry.spanId
+      ? `${entry.traceId}:${entry.spanId}`
+      : `sin-span-id:${entry.sequence}`;
 
     if (seen.has(key)) {
       continue;
@@ -1899,7 +1940,9 @@ function getEntryDatabaseOrCollection(item: TraceEntry): string {
   ).trim();
 }
 
-function getTotalDuration(entries: TraceEntry[]): number {
+function getTotalDuration(entries: TraceEntry[]): number | null {
+  // Un total de sección es desconocido cuando falta el tiempo de algún span.
+  if (entries.some((entry) => entry.durationMs === null)) return null;
   return entries.reduce((sum, item) => {
     const durationMs = Number(item.durationMs ?? 0);
     return sum + (Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 0);
@@ -1982,9 +2025,11 @@ function buildJdbcTreeSection(
       methodEntries.forEach((item, index) => {
         const isLast = index === methodEntries.length - 1;
         const branch = isLast ? "    │   └──" : "    │   ├──";
-        const classification = jumpByEntry.get(item) === true
-          ? "Salto"
-          : "Consulta";
+        const classification = getJdbcSqlMethod(item) === "SELECT"
+          ? "Consulta"
+          : jumpByEntry.get(item) === true
+            ? "Salto"
+            : "Sin clasificar";
 
         const invokedParam = getEntryInvokedParam(item);
         const database = getEntryDatabaseOrCollection(item);
@@ -2177,34 +2222,32 @@ type TraceFlowSummary = {
   label: string;
   entries: TraceEntry[];
   totalSaltos: number;
+  consultasJdbcSelect: number;
+  traceResponseMs: number | null;
   tiempoTotal: number;
   totalTiempoEsperadoAws: number;
+  missingDurations: number;
+  timedEntries: number;
+  muAverageMs: number;
 };
 
 type AwsTraceCalculation = {
   totalSaltos: number;
+  consultasJdbcSelect: number;
   tiempoTotal: number;
   totalTiempoEsperadoAws: number;
+  missingDurations: number;
+  timedEntries: number;
 };
-
-function getTraceResponseTime(entries: TraceEntry[]): number {
-  return entries.reduce(
-    (sum, item) => sum + Number(item.durationMs ?? 0),
-    0
-  );
-}
 
 /**
  * Reglas para el cálculo de AWS:
  *
  * 1. JDBC INSERT, UPDATE, DELETE y MERGE cuentan como salto.
- * 2. Un JDBC SELECT anterior a cualquier INSERT/UPDATE/DELETE o utilidad
- *    se conserva como consulta: aporta su tiempo de traza, pero no añade salto.
- * 3. Un JDBC SELECT posterior a INSERT/UPDATE/DELETE cuenta como salto.
- * 4. Un JDBC SELECT posterior a cualquier utilidad no JDBC dentro del mismo
- *    flujo también cuenta como salto.
- * 5. Las utilidades distintas de JDBC cuentan como salto.
- * 6. GRPC se excluye del detalle, del tiempo y del número de saltos.
+ * 2. JDBC SELECT siempre es consulta: aporta duración, pero no añade salto.
+ * 3. Las utilidades distintas de JDBC reconocidas cuentan como salto.
+ * 4. GRPC se excluye del detalle, del tiempo y del número de saltos.
+ * 5. Si RHO omite duraciones, el total es parcial y no se informa como 0.
  *
  * Fórmula:
  *   Tiempo total = suma de consultas + suma de saltos, sin GRPC.
@@ -2215,9 +2258,12 @@ function calculateAwsTraceMetrics(entries: TraceEntry[]): AwsTraceCalculation {
   const jumpFlags = getAwsJumpFlags(effectiveEntries);
 
   let totalSaltos = 0;
+  let consultasJdbcSelect = 0;
   let tiempoTotal = 0;
+  let timedEntries = 0;
 
   effectiveEntries.forEach((entry, index) => {
+    if (entry.durationMs !== null) timedEntries += 1;
     const durationMs = Number(entry.durationMs ?? 0);
     const safeDurationMs =
       Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 0;
@@ -2231,11 +2277,15 @@ function calculateAwsTraceMetrics(entries: TraceEntry[]): AwsTraceCalculation {
     if (jumpFlags[index] === true) {
       totalSaltos += 1;
     }
+    if (isJdbcSelectEntry(entry)) consultasJdbcSelect += 1;
   });
 
   return {
     totalSaltos,
+    consultasJdbcSelect,
     tiempoTotal,
+    timedEntries,
+    missingDurations: effectiveEntries.length - timedEntries,
     totalTiempoEsperadoAws:
       tiempoTotal + AWS_NETWORK_CONSTANT_MS * totalSaltos,
   };
@@ -2248,16 +2298,17 @@ function getExpectedAwsTimeForEntries(entries: TraceEntry[]): number {
 function buildTraceFlowSummary(
   entries: TraceEntry[],
   index: number,
-  responseTimeMs = 0
+  responseTimeMs = 0,
+  traceResponseMs: number | null = null,
 ): TraceFlowSummary {
-  void responseTimeMs;
-
   const calculation = calculateAwsTraceMetrics(entries);
 
   return {
     label: `Flujo ${index + 1}`,
     entries,
     ...calculation,
+    traceResponseMs,
+    muAverageMs: Number.isFinite(responseTimeMs) && responseTimeMs > 0 ? responseTimeMs : 0,
   };
 }
 
@@ -2267,12 +2318,25 @@ function appendTraceSummaryHeader(
 ): void {
   lines.push("RESUMEN DE SALTOS Y TIEMPOS DE RESPUESTA");
   lines.push(`Total de saltos encontrados: ${summary.totalSaltos}`);
-  lines.push(`Tiempo total: ${formatTraceDuration(summary.tiempoTotal)}`);
-  lines.push(
-    `Total de Tiempo Esperado en AWS: ${formatTraceDuration(
-      summary.totalTiempoEsperadoAws
-    )}`
-  );
+  lines.push(`Consultas JDBC SELECT: ${summary.consultasJdbcSelect}`);
+  lines.push(`Tiempo de respuesta promedio (MU/InvokeTx): ${summary.muAverageMs > 0 ? formatTraceDuration(summary.muAverageMs) : "N/D"}`);
+  lines.push(`Tiempo de respuesta de la traza (RHO): ${summary.traceResponseMs === null ? "N/D (sin duración de Transaction/Job)" : formatTraceDuration(summary.traceResponseMs)}`);
+  if (summary.missingDurations) {
+    const detail = summary.timedEntries
+      ? `suma parcial: ${formatTraceDuration(summary.tiempoTotal)}`
+      : "ninguna duración disponible";
+    lines.push(
+      `Tiempo total: N/D (${summary.timedEntries}/${summary.entries.length} spans con duración RHO; ${detail})`
+    );
+    lines.push(
+      `Total de Tiempo Esperado en AWS: ≥${formatTraceDuration(summary.totalTiempoEsperadoAws)} (mínimo estimado; faltan ${summary.missingDurations} duraciones RHO)`
+    );
+  } else {
+    lines.push(`Tiempo total: ${formatTraceDuration(summary.tiempoTotal)}`);
+    lines.push(
+      `Total de Tiempo Esperado en AWS: ${formatTraceDuration(summary.totalTiempoEsperadoAws)}`
+    );
+  }
   lines.push("");
   lines.push("=== DETALLE DE TRAZAS ===");
   lines.push("");
@@ -2360,6 +2424,8 @@ function buildCombinedFlowSummary(
       (sum, flow) => sum + flow.totalSaltos,
       0
     ),
+    consultasJdbcSelect: flowSummaries.reduce((sum, flow) => sum + flow.consultasJdbcSelect, 0),
+    traceResponseMs: flowSummaries.length === 1 ? flowSummaries[0].traceResponseMs : null,
     tiempoTotal: flowSummaries.reduce(
       (sum, flow) => sum + flow.tiempoTotal,
       0
@@ -2368,15 +2434,18 @@ function buildCombinedFlowSummary(
       (sum, flow) => sum + flow.totalTiempoEsperadoAws,
       0
     ),
+    timedEntries: flowSummaries.reduce((sum, flow) => sum + flow.timedEntries, 0),
+    missingDurations: flowSummaries.reduce((sum, flow) => sum + flow.missingDurations, 0),
+    muAverageMs: flowSummaries[0]?.muAverageMs ?? 0,
   };
 }
 
-function buildTraceSummary(entries: TraceEntry[], responseTimeMs = 0): string {
+function buildTraceSummary(entries: TraceEntry[], responseTimeMs = 0, traceResponseMs: number | null = null): string {
   const visibleEntries = entries.filter((entry) => !isGrpcEntry(entry));
 
   if (!visibleEntries.length) return "Sin trazas encontradas";
 
-  const summary = buildTraceFlowSummary(visibleEntries, 0, responseTimeMs);
+  const summary = buildTraceFlowSummary(visibleEntries, 0, responseTimeMs, traceResponseMs);
   const lines: string[] = [];
 
   appendTraceSummaryHeader(lines, summary);
@@ -2387,7 +2456,8 @@ function buildTraceSummary(entries: TraceEntry[], responseTimeMs = 0): string {
 
 function buildTraceSummaryByFlows(
   flows: TraceEntry[][],
-  responseTimeMs = 0
+  responseTimeMs = 0,
+  traceResponseMs: number | null = null,
 ): string {
   const validFlows = flows
     .map((entries) => entries.filter((entry) => !isGrpcEntry(entry)))
@@ -2396,7 +2466,7 @@ function buildTraceSummaryByFlows(
   if (!validFlows.length) return "Sin trazas encontradas";
 
   if (validFlows.length === 1) {
-    return buildTraceSummary(validFlows[0], responseTimeMs);
+    return buildTraceSummary(validFlows[0], responseTimeMs, traceResponseMs);
   }
 
   const flowSummaries = validFlows.map((entries, index) =>
@@ -2480,6 +2550,454 @@ async function fetchTracesByLibraries(params: {
   return trace ? [trace] : [];
 }
 
+/**
+ * Recuperación progresiva: Rho no garantiza que name, channel-code, site y
+ * invokerTx existan en el MISMO span. Primero se buscan Transaction/Job y,
+ * si hace falta, sus utilidades. El scope se verifica al descargar el trace.
+ */
+const DASHBOARD_RHO_BUDGET_MS = 48_000;
+const DASHBOARD_RHO_SEARCH_TIMEOUT_MS = 5_500;
+const DASHBOARD_RHO_RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
+const DASHBOARD_RHO_TRACE_RESERVE_MS = 12_000;
+const DASHBOARD_RHO_PAGE_SIZE = 100;
+const dashboardTraceByTx = new Map<string, RawSpan>();
+const dashboardPartialExpiry = new Map<string, number>();
+const dashboardTraceFailures = new Map<string, number>();
+const dashboardTracePending = new Map<string, Promise<DashboardRhoSnapshot>>();
+
+export interface DashboardRhoSnapshot {
+  trace: string;
+  metadata: TraceSpanMetadata;
+  channels: TraceChannelMetadata[];
+  warning?: string;
+}
+
+type DashboardSearchPlan = {
+  kind: "name" | "invokerTx" | "library";
+  window: "recent" | "full" | "oldest" | "middle";
+  scope: boolean;
+  channel: boolean;
+  library?: string;
+  // La primera búsqueda de librería conserva invokerTx; el fallback final
+  // permite que la propiedad no venga indexada en el span.
+  requireInvokerTx?: boolean;
+  libraryByProperty?: boolean;
+};
+
+function escapeRhoQueryValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function dashboardSearchUrl(
+  filters: MetricsFilters,
+  invokerTx: string,
+  fromDate: Date,
+  toDate: Date,
+  plan: DashboardSearchPlan,
+): string {
+  const { from, to } = dateRangeToNano(fromDate, toDate);
+  const url = new URL(buildRhoSpanSearchUrl({
+    baseSite: filters.site,
+    fromDate: from,
+    toDate: to,
+    includeDuration: false,
+  }));
+  const safeTx = escapeRhoQueryValue(invokerTx.trim());
+  const q: string[] = [];
+  if (plan.kind === "name") q.push(`name == "${safeTx}"`);
+  if (plan.kind === "invokerTx" || plan.requireInvokerTx) {
+    q.push(`properties.invokerTx == "${safeTx}"`);
+  }
+  if (plan.kind === "library" && plan.library) {
+    const library = escapeRhoQueryValue(plan.library);
+    q.push(plan.libraryByProperty
+      ? `properties.invokerLibrary == "${library}"`
+      : `name == "*${library}*"`);
+  }
+  if (plan.scope) {
+    const scope = buildRhoScopeFilter(filters);
+    if (scope) q.push(scope);
+  }
+  if (plan.channel) {
+    const channel = buildRhoChannelCodeFilter(getSelectedChannelCodes(filters));
+    if (channel) q.push(channel);
+  }
+  url.searchParams.set("q", q.join(" and "));
+  url.searchParams.set("sort", "descending");
+  url.searchParams.set("size", String(DASHBOARD_RHO_PAGE_SIZE));
+  return url.toString();
+}
+
+/** Algunas respuestas traen data[], otras data.items[] o spans[].
+ * spanId es suficiente para llamar a :trace, aunque falte traceId.
+ */
+function readDashboardSearchSpans(response: unknown): RawSpan[] {
+  const collected: RawSpan[] = [];
+  const seen = new Set<string>();
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > 7 || !value || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      value.forEach((item) => visit(item, depth + 1));
+      return;
+    }
+    const row = value as Record<string, unknown>;
+    const spanId = typeof row.spanId === "string" ? row.spanId.trim() : "";
+    if (spanId) {
+      if (!seen.has(spanId)) {
+        seen.add(spanId);
+        collected.push(row as RawSpan);
+      }
+      return;
+    }
+    for (const key of ["data", "spans", "items", "results", "content", "span", "root", "trace", "result"]) {
+      if (key in row) visit(row[key], depth + 1);
+    }
+  };
+  visit(response, 0);
+  return collected;
+}
+
+type TraceContextCheck = { accepted: boolean; reason: string; unverified: string[] };
+
+function matchesRhoTraceContext(
+  trace: RawSpan,
+  filters: MetricsFilters,
+  invokerTx: string,
+  hintSpan?: RawSpan,
+): TraceContextCheck {
+  const selectedCodes = getSelectedChannelCodes(filters).map(canonicalChannelCode);
+  const expectedTx = invokerTx.trim().toUpperCase();
+  const selectedEnv = normalizeRhoEnvironment(filters.environment);
+  const selectedSite = String(filters.site ?? "").trim().toUpperCase();
+  const channels = new Set<string>();
+  const environments = new Set<string>();
+  const sites = new Set<string>();
+  const transactions = new Set<string>();
+  const queue: RawSpan[] = [trace];
+  const visited = new WeakSet<object>();
+  let visitedCount = 0;
+  while (queue.length && visitedCount < 20000) {
+    const node = queue.pop();
+    if (!node || typeof node !== "object" || visited.has(node)) continue;
+    visited.add(node);
+    visitedCount += 1;
+    const props = node.properties ?? {};
+    const name = String(node.name ?? "").trim().toUpperCase();
+    const nodeTx = String(props.invokerTx ?? "").trim().toUpperCase();
+    if (nodeTx) transactions.add(nodeTx);
+    if (name === expectedTx || name.startsWith(`${expectedTx}-`)) transactions.add(expectedTx);
+    const channel = canonicalChannelCode(props["channel-code"] ?? props.channelCode);
+    if (channel) channels.add(channel);
+    const env = normalizeRhoEnvironment(props.env);
+    if (env) environments.add(env);
+    const site = String(props.site ?? "").trim().toUpperCase();
+    if (site) sites.add(site);
+    if (Array.isArray(node.children)) queue.push(...node.children);
+  }
+  const hintTx = String(hintSpan?.properties?.invokerTx ?? "").trim().toUpperCase();
+  const hintName = String(hintSpan?.name ?? "").trim().toUpperCase();
+  const txMatches = transactions.has(expectedTx) || hintTx === expectedTx || hintName === expectedTx;
+  if (!txMatches) return { accepted: false, reason: "El trace no identifica la transacción solicitada", unverified: [] };
+  if (selectedCodes.length && channels.size && !selectedCodes.some((code) => channels.has(code))) {
+    return { accepted: false, reason: `Canal distinto: ${[...channels].join(", ")}`, unverified: [] };
+  }
+  if (isWorkSite(filters.site) && selectedEnv && environments.size && !environments.has(selectedEnv)) {
+    return { accepted: false, reason: `Entorno distinto: ${[...environments].join(", ")}`, unverified: [] };
+  }
+  // El host RHO identifica LIVE/WORK; properties.site es opcional en cada span.
+  // Rechazar solo contradicciones explícitas, no valores ausentes.
+  if (!isWorkSite(filters.site) && selectedSite && sites.size && !sites.has(selectedSite)) {
+    return { accepted: false, reason: `Sitio distinto: ${[...sites].join(", ")}`, unverified: [] };
+  }
+  const unverified: string[] = [];
+  if (selectedCodes.length && !channels.size) unverified.push("canal");
+  if (isWorkSite(filters.site) && selectedEnv && !environments.size) unverified.push("entorno");
+  if (!isWorkSite(filters.site) && selectedSite && !sites.size) unverified.push("sitio");
+  return { accepted: true, reason: "", unverified };
+}
+
+function isRhoAuthenticationError(error: unknown): boolean {
+  return /\bHTTP\s+(401|403)\b/i.test(String(error instanceof Error ? error.message : error));
+}
+
+async function recoverDashboardRhoSnapshot(
+  filters: MetricsFilters,
+  invokerTx: string,
+  responseTimeMs: number | undefined,
+  invokerLibraryHints: string[],
+  cacheKey: string,
+): Promise<DashboardRhoSnapshot> {
+  const controller = new AbortController();
+  const timeoutId = globalThis.setTimeout(() => controller.abort(), DASHBOARD_RHO_BUDGET_MS);
+  const started = Date.now();
+  const errors: string[] = [];
+  const rejected: string[] = [];
+  let completedSearches = 0;
+  let candidatesFound = 0;
+  let attemptsMade = 0;
+  let truncatedByBudget = false;
+  let partialSnapshot: DashboardRhoSnapshot | null = null;
+  let partialTrace: RawSpan | null = null;
+  try {
+    const fromMs = filters.fromDate.getTime();
+    const toMs = filters.toDate.getTime();
+    if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || fromMs > toMs) {
+      throw new Error("Rango de fechas inválido para búsqueda Rho");
+    }
+    const dayMs = DASHBOARD_RHO_RECENT_WINDOW_MS;
+    const spanMs = Math.max(1, toMs - fromMs);
+    const mid = Math.round((fromMs + toMs) / 2);
+    const windows = {
+      full: { from: filters.fromDate, to: filters.toDate },
+      recent: { from: new Date(Math.max(fromMs, toMs - dayMs)), to: filters.toDate },
+      oldest: { from: filters.fromDate, to: new Date(Math.min(toMs, fromMs + dayMs)) },
+      middle: { from: new Date(Math.max(fromMs, mid - dayMs / 2)), to: new Date(Math.min(toMs, mid + dayMs / 2)) },
+    };
+    const libraries = Array.from(new Set(invokerLibraryHints.map((v) => v.trim()).filter(Boolean))).slice(0, 3);
+    // No exigir properties.site/env en el mismo span que el nombre o invokerTx.
+    // El endpoint LIVE/WORK y el árbol recuperado permitirán validar contexto.
+    const plans: DashboardSearchPlan[] = [
+      { kind: "name", window: "full", scope: false, channel: false },
+      { kind: "invokerTx", window: "full", scope: false, channel: true },
+      { kind: "invokerTx", window: "full", scope: false, channel: false },
+      { kind: "name", window: "recent", scope: false, channel: false },
+      ...libraries.map((library): DashboardSearchPlan => ({
+        kind: "library", library, libraryByProperty: true,
+        window: "full", scope: false, channel: false,
+      })),
+      { kind: "invokerTx", window: "recent", scope: false, channel: false },
+      { kind: "name", window: "oldest", scope: false, channel: false },
+      { kind: "name", window: "middle", scope: false, channel: false },
+      ...libraries.map((library): DashboardSearchPlan => ({
+        kind: "library", library, window: "recent", scope: false, channel: false,
+      })),
+      { kind: "invokerTx", window: "oldest", scope: false, channel: false },
+      { kind: "invokerTx", window: "middle", scope: false, channel: false },
+      { kind: "name", window: "full", scope: true, channel: false },
+    ];
+    const visitedUrls = new Set<string>();
+    const visitedSpanIds = new Set<string>();
+    const headers = buildAuthHeaders(filters.bearerToken);
+    for (const plan of plans) {
+      if (controller.signal.aborted) break;
+      const availableMs = DASHBOARD_RHO_BUDGET_MS - (Date.now() - started);
+      if (availableMs <= DASHBOARD_RHO_TRACE_RESERVE_MS) {
+        truncatedByBudget = true;
+        break;
+      }
+      const window = windows[plan.window];
+      const url = dashboardSearchUrl(filters, invokerTx, window.from, window.to, plan);
+      if (visitedUrls.has(url)) continue;
+      visitedUrls.add(url);
+      attemptsMade += 1;
+      let matches: RawSpan[];
+      try {
+        const response = await apiRequestWithRetry<SpansPaginatedResponse>(
+          url,
+          {
+            headers,
+            timeoutMs: Math.max(1_000, Math.min(DASHBOARD_RHO_SEARCH_TIMEOUT_MS, availableMs - DASHBOARD_RHO_TRACE_RESERVE_MS)),
+            signal: controller.signal,
+          },
+          1,
+        );
+        completedSearches += 1;
+        matches = readDashboardSearchSpans(response);
+        candidatesFound += matches.length;
+        console.info("[RHO Dashboard] Búsqueda respondida", {
+          invokerTx, strategy: plan.kind, window: plan.window,
+          channelFilter: plan.channel, scopeFilter: plan.scope,
+          matches: matches.length, count: completedSearches,
+        });
+      } catch (error) {
+        if (controller.signal.aborted || isRhoAuthenticationError(error)) throw error;
+        errors.push(`búsqueda ${plan.kind}/${plan.window}: ${error instanceof Error ? error.message : String(error)}`);
+        continue;
+      }
+      if (!matches.length) continue;
+      const selectedChannels = getSelectedChannelCodes(filters).map(canonicalChannelCode);
+      const ranked = sortSpansByDurationTarget(
+        matches.filter((span) => String(span.spanId ?? "").trim() && !visitedSpanIds.has(String(span.spanId).trim())),
+        responseTimeMs,
+      ).sort((a, b) => {
+        const rank = (span: RawSpan): number => {
+          const channel = canonicalChannelCode(getSpanProperty(span, "channel-code") || getSpanProperty(span, "channelCode"));
+          if (!selectedChannels.length) return 0;
+          return !channel ? 1 : selectedChannels.includes(channel) ? 0 : 2;
+        };
+        return rank(a) - rank(b);
+      });
+      for (const hintSpan of ranked.slice(0, 6)) {
+        if (controller.signal.aborted) break;
+        const remainingMs = DASHBOARD_RHO_BUDGET_MS - (Date.now() - started);
+        if (remainingMs < 3_000) { truncatedByBudget = true; break; }
+        visitedSpanIds.add(String(hintSpan.spanId).trim());
+        try {
+          const trace = await fetchFullTraceByHintSpan({
+            filters, invokerTx, hintSpan, signal: controller.signal, quick: true,
+          });
+          if (!trace) {
+            rejected.push("La respuesta :trace no incluye un span válido");
+            continue;
+          }
+          const context = matchesRhoTraceContext(trace, filters, invokerTx, hintSpan);
+          if (!context.accepted) {
+            rejected.push(context.reason);
+            continue;
+          }
+          const snapshot = dashboardSnapshotFromTrace(trace, filters, invokerTx, responseTimeMs);
+          const hasTransactionRoot = flattenSpans([trace]).some((span) => isTransactionSpan(span, invokerTx));
+          if (!hasTransactionRoot || snapshot.warning) {
+            // Hay evidencia de una ejecución, pero puede ser solo un subárbol.
+            // Guardarla por si ninguna búsqueda entrega el árbol completo.
+            if (!partialSnapshot) {
+              partialTrace = trace;
+              partialSnapshot = {
+                ...snapshot,
+                warning: snapshot.warning ?? "Rho devolvió un span de utilidad sin la raíz Transaction/Job.",
+              };
+            }
+            continue;
+          }
+          putBoundedCache(dashboardTraceByTx, cacheKey, trace, 100);
+          dashboardPartialExpiry.delete(cacheKey);
+          dashboardTraceFailures.delete(cacheKey);
+          if (context.unverified.length) {
+            console.info("[RHO Dashboard] Metadatos no presentes en el árbol, pero sin contradicción", {
+              invokerTx, missing: context.unverified,
+            });
+          }
+          return snapshot;
+        } catch (error) {
+          if (controller.signal.aborted || isRhoAuthenticationError(error)) throw error;
+          errors.push(`trace ${hintSpan.spanId}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    }
+    if (partialSnapshot) {
+      if (partialTrace) {
+        putBoundedCache(dashboardTraceByTx, cacheKey, partialTrace, 100);
+        putBoundedCache(dashboardPartialExpiry, cacheKey, Date.now() + 10_000, 100);
+      }
+      dashboardTraceFailures.delete(cacheKey);
+      return partialSnapshot;
+    }
+    const state = controller.signal.aborted
+      ? `tiempo límite de ${DASHBOARD_RHO_BUDGET_MS / 1000}s`
+      : errors.length || truncatedByBudget
+        ? "búsqueda incompleta por timeout/errores"
+        : "búsqueda sin coincidencias verificables";
+    const reason = [
+      `${state}`,
+      `${attemptsMade} estrategia(s) consultadas`,
+      `${completedSearches} respuestas OK`,
+      `${candidatesFound} spans recibidos`,
+      `${rejected.length} trazas descartadas`,
+      `${errors.length} errores`,
+    ].join(" · ");
+    console.warn("[RHO Dashboard] Diagnóstico de recuperación", {
+      invokerTx, site: filters.site, environment: filters.environment,
+      channelCodes: getSelectedChannelCodes(filters), reason,
+      rejected: rejected.slice(0, 3), errors: errors.slice(0, 3),
+    });
+    putBoundedCache(dashboardTraceFailures, cacheKey, Date.now() + 4_000, 100);
+    return {
+      trace: `Trace no recuperada (RHO: ${reason}). No se descartan las métricas MU.`,
+      metadata: {}, channels: [], warning: reason,
+    };
+  } catch (error) {
+    if (partialSnapshot) {
+      if (partialTrace) {
+        putBoundedCache(dashboardTraceByTx, cacheKey, partialTrace, 100);
+        putBoundedCache(dashboardPartialExpiry, cacheKey, Date.now() + 10_000, 100);
+      }
+      dashboardTraceFailures.delete(cacheKey);
+      return partialSnapshot;
+    }
+    const reason = controller.signal.aborted
+      ? `Rho superó ${DASHBOARD_RHO_BUDGET_MS / 1000}s para esta transacción`
+      : error instanceof Error ? error.message : String(error);
+    console.warn("[RHO Dashboard] Error de recuperación", { invokerTx, reason });
+    putBoundedCache(dashboardTraceFailures, cacheKey, Date.now() + 4_000, 100);
+    return {
+      trace: `Trace no disponible (RHO: ${reason}). Las métricas MU se conservaron.`,
+      metadata: {}, channels: [], warning: reason,
+    };
+  } finally {
+    globalThis.clearTimeout(timeoutId);
+  }
+}
+
+/** Una sola búsqueda por transacción/rango/canal, también entre filas concurrentes. */
+export async function fetchDashboardRhoSnapshot(
+  filters: MetricsFilters,
+  invokerTx: string,
+  responseTimeMs?: number,
+  invokerLibraryHints: string[] = [],
+): Promise<DashboardRhoSnapshot> {
+  const cacheKey = getCacheScope(filters, invokerTx);
+  const partialUntil = dashboardPartialExpiry.get(cacheKey);
+  if (partialUntil && partialUntil <= Date.now()) {
+    dashboardPartialExpiry.delete(cacheKey);
+    dashboardTraceByTx.delete(cacheKey);
+  }
+  const cached = dashboardTraceByTx.get(cacheKey);
+  if (cached) return dashboardSnapshotFromTrace(cached, filters, invokerTx, responseTimeMs);
+  // No fusionar una búsqueda sin librerías con otra que sí tiene pistas:
+  // la primera podría concluir sin activar los respaldos disponibles.
+  const pendingKey = `${cacheKey}|${Array.from(new Set(invokerLibraryHints.map((hint) => hint.trim()).filter(Boolean))).sort().join(",")}`;
+  const pending = dashboardTracePending.get(pendingKey);
+  if (pending) return pending;
+  const promise = recoverDashboardRhoSnapshot(filters, invokerTx, responseTimeMs, invokerLibraryHints, cacheKey);
+  dashboardTracePending.set(pendingKey, promise);
+  try {
+    return await promise;
+  } finally {
+    dashboardTracePending.delete(pendingKey);
+  }
+}
+
+function dashboardSnapshotFromTrace(
+  trace: RawSpan,
+  filters: MetricsFilters,
+  invokerTx: string,
+  responseTimeMs?: number,
+): DashboardRhoSnapshot {
+  const channels: TraceChannelMetadata[] = [];
+  collectChannelMetadataFromTrace(trace, channels);
+  const uniqueChannels = dedupeTraceChannels(channels);
+  const selectedCodes = getSelectedChannelCodes(filters);
+  const metadata = uniqueChannels.find((channel) =>
+    Boolean(channel.channelCode && selectedCodes.map(canonicalChannelCode).includes(canonicalChannelCode(channel.channelCode)))
+  ) ?? extractSpanMetadata(trace);
+  const entries: TraceEntry[] = [];
+  collectTraceEntries(trace, entries);
+  const filtered = filterEntriesByChannel(dedupeTraceEntries(entries), selectedCodes);
+  const traceDuration = readTraceTransactionDurationMs(trace, invokerTx, selectedCodes);
+  if (!filtered.length) {
+    return {
+      trace: [
+        "Traza RHO localizada, pero el endpoint :trace no devolvió utilidades clasificables.",
+        `Tiempo de respuesta promedio (MU/InvokeTx): ${formatTraceDuration(responseTimeMs ?? null)}`,
+        `Tiempo de respuesta de la traza (RHO): ${formatTraceDuration(traceDuration)}`,
+        "Consultas JDBC SELECT (READ ONLY): N/D (árbol sin detalle de utilidades)",
+      ].join("\n"),
+      metadata,
+      channels: uniqueChannels,
+      warning: "RHO entregó el span principal sin sus utilidades; se conservó la traza como parcial.",
+    };
+  }
+  return {
+    trace: buildTraceSummary(filtered, responseTimeMs, traceDuration),
+    metadata,
+    channels: uniqueChannels,
+  };
+}
+
+/**
+ * El Dashboard selecciona una transacción y muestra su detalle sin repetir
+ * las búsquedas amplias de librerías que podían tardar varios minutos.
+ */
 export async function fetchSpans(
   filters: MetricsFilters,
   invokerTx: string,
@@ -2487,78 +3005,42 @@ export async function fetchSpans(
   invokerLibraryHint?: string,
   invokerLibraryHints?: string[]
 ): Promise<NormalizedSpan[]> {
-  const libraryTraces = await fetchTracesByLibraries({
-    filters,
-    invokerTx,
-    responseTimeMs,
-    invokerLibraryHint,
-    invokerLibraryHints,
-  });
-
-  if (libraryTraces.length > 0) {
-    const normalized = dedupeNormalizedSpans(
-      libraryTraces.flatMap((trace) => normalizeSpans(trace))
-    );
-
-    const channelCodes = getSelectedChannelCodes(filters);
-
-    if (!channelCodes.length) {
-      return normalized;
+  const cacheKey = getCacheScope(filters, invokerTx);
+  if (!dashboardTraceByTx.has(cacheKey)) {
+    if ((dashboardTraceFailures.get(cacheKey) ?? 0) > Date.now()) {
+      return [];
     }
-
-    const exactMatches = normalized.filter((span) => {
-      const channelCode =
-        String(span.channelCode ?? "").trim() ||
-        String(span.properties?.["channel-code"] ?? "").trim() ||
-        String(span.properties?.channelCode ?? "").trim();
-
-      return channelCodes.includes(channelCode);
-    });
-
-    return exactMatches.length ? exactMatches : normalized;
+    // Si se elige una transacción aún no recuperada, aplicar el mismo camino
+    // rápido y el mismo presupuesto de tiempo que al cargar las métricas MU.
+    const hints = [invokerLibraryHint, ...(invokerLibraryHints ?? [])]
+      .map((value) => String(value ?? "").trim())
+      .filter(Boolean);
+    await fetchDashboardRhoSnapshot(filters, invokerTx, responseTimeMs, hints);
   }
 
-  const hintSpan = await searchBestSpan(
-    filters,
-    invokerTx,
-    responseTimeMs,
-    invokerLibraryHint
-  );
+  const trace = dashboardTraceByTx.get(cacheKey);
+  if (!trace) return [];
 
-  if (!hintSpan?.spanId) {
-    console.warn(`[RHO] No se encontró span para invokerTx=${invokerTx}`);
-    return [];
-  }
+  const normalized = dedupeNormalizedSpans(normalizeSpans(trace));
+  const selectedChannels = getSelectedChannelCodes(filters);
+  if (!selectedChannels.length) return normalized;
 
-  const trace = await fetchFullTraceByHintSpan({
-    filters,
-    invokerTx,
-    hintSpan,
+  // El span Transaction puede tener canal y sus hijos Mongo/JDBC no. Al
+  // mostrar solo los spans etiquetados desaparecían todas las utilidades.
+  const compatible = normalized.filter((span) => {
+    const channel = String(
+      span.channelCode ?? span.properties?.["channel-code"] ?? span.properties?.channelCode ?? ""
+    ).trim();
+    return !channel || selectedChannels.map(canonicalChannelCode).includes(canonicalChannelCode(channel));
   });
-
-  if (!trace) {
-    return [];
-  }
-
-  const normalized = normalizeSpans(trace);
-  const channelCodes = getSelectedChannelCodes(filters);
-
-  if (!channelCodes.length) {
-    return normalized;
-  }
-
-  const exactMatches = normalized.filter((span) => {
-    const channelCode =
-      String(span.channelCode ?? "").trim() ||
-      String(span.properties?.["channel-code"] ?? "").trim() ||
-      String(span.properties?.channelCode ?? "").trim();
-
-    return channelCodes.includes(channelCode);
-  });
-
-  return exactMatches.length ? exactMatches : normalized;
+  return compatible.length ? compatible : normalized;
 }
 
+/**
+ * AWS Inform y Dashboard consultaban por caminos diferentes: el primero seguía
+ * devolviendo "Sin trazas encontradas" por la búsqueda antigua. Centralizar
+ * garantiza el mismo trace, canal y diagnóstico en ambos informes.
+ */
 export async function fetchTraceSummaryForInvokerTx(
   filters: MetricsFilters,
   invokerTx: string,
@@ -2566,66 +3048,13 @@ export async function fetchTraceSummaryForInvokerTx(
   invokerLibraryHint?: string,
   invokerLibraryHints?: string[]
 ): Promise<string> {
-  console.info("[AWS TRACE] Motor de cálculo activo: v16-select-read-only");
-  const libraryTraces = await fetchTracesByLibraries({
+  const snapshot = await fetchDashboardRhoSnapshot(
     filters,
     invokerTx,
     responseTimeMs,
-    invokerLibraryHint,
-    invokerLibraryHints,
-  });
-
-  if (libraryTraces.length > 0) {
-    const flowEntries = dedupeTraceEntryFlows(
-      libraryTraces
-        .map((trace) => {
-          const entries: TraceEntry[] = [];
-
-          collectTraceEntries(trace, entries);
-
-          return filterEntriesByChannel(
-            dedupeTraceEntries(entries),
-            getSelectedChannelCodes(filters)
-          );
-        })
-        .filter((entries) => entries.length > 0)
-    );
-
-    if (flowEntries.length > 0) {
-      return buildTraceSummaryByFlows(flowEntries, responseTimeMs);
-    }
-  }
-
-  const hintSpan = await searchBestSpan(
-    filters,
-    invokerTx,
-    responseTimeMs,
-    invokerLibraryHint
+    [invokerLibraryHint, ...(invokerLibraryHints ?? [])]
+      .map((hint) => String(hint ?? "").trim())
+      .filter(Boolean),
   );
-
-  if (!hintSpan?.spanId) {
-    console.warn(`[RHO] No se encontró span para resumen invokerTx=${invokerTx}`);
-    return "Sin trazas encontradas";
-  }
-
-  const trace = await fetchFullTraceByHintSpan({
-    filters,
-    invokerTx,
-    hintSpan,
-  });
-
-  if (!trace) {
-    return "Sin trazas encontradas";
-  }
-
-  const entries: TraceEntry[] = [];
-
-  collectTraceEntries(trace, entries);
-
-  const filteredEntries = filterEntriesByChannel(
-    dedupeTraceEntries(entries),
-    getSelectedChannelCodes(filters)
-  );
-
-  return buildTraceSummary(filteredEntries, responseTimeMs);
+  return snapshot.trace;
 }

@@ -65,6 +65,18 @@ export default defineConfig({
         secure: false,
         rewrite: (p) => p.replace(/^\/rho-live-02/, ""),
       },
+      "/rho-live-04": {
+        target: "https://rho.live-04.nextgen.igrupobbva",
+        changeOrigin: true,
+        secure: false,
+        rewrite: (p) => p.replace(/^\/rho-live-04/, ""),
+      },
+      "/rho-work-02": {
+        target: "https://rho.work-02.nextgen.igrupobbva",
+        changeOrigin: true,
+        secure: false,
+        rewrite: (p) => p.replace(/^\/rho-work-02/, ""),
+      },
       "/omega-live-02": {
         target: "https://omega.live-02.nextgen.igrupobbva",
         changeOrigin: true,

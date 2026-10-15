@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import { GROUPED_CHANNEL_CODES, type MetricRow } from "@/types/bbva";
 import { buildAwsAnalysisReport } from "@/services/awsReportBuilder";
 import { buildAwsTraceSummary } from "@/services/awsTraceSummary";
+import { getJdbcMethodsFromTrace } from "@/services/jdbcTraceMethods";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -51,7 +52,9 @@ type InvokedParamItem = {
   utilitytype?: string;
   invokedparam?: string;
   count?: number;
-  maxDuration?: number;
+  maxDuration?: number | null;
+  avgDuration?: number | null;
+  minDuration?: number | null;
 };
 
 interface MetricsTableProps {
@@ -304,6 +307,15 @@ function formatMs(value: number): string {
   })} ms`;
 }
 
+function formatInvokedParamMs(value: number | null | undefined, minimumFractionDigits = 0): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "—";
+
+  return `${value.toLocaleString("en-US", {
+    minimumFractionDigits,
+    maximumFractionDigits: 2,
+  })} ms`;
+}
+
 function parseInvokerTx(value: unknown): InvokerTxMeta {
   return safeJsonParse<InvokerTxMeta>(value, {});
 }
@@ -357,32 +369,6 @@ function buildUtilitySummary(row: MetricRow): string {
   }
 
   return Array.from(result).join(", ") || "-";
-}
-
-function getJdbcMethodsFromTrace(trace: unknown): string[] {
-  const text = String(trace ?? "");
-  const methods = new Set<string>();
-
-  // Formato actual del detalle: SELECT: 4 / UPDATE: 2 / etc.
-  for (const method of ["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE"]) {
-    const regex = new RegExp(`\\b${method}\\s*:\\s*\\d+`, "i");
-
-    if (regex.test(text)) {
-      methods.add(method);
-    }
-  }
-
-  // Compatibilidad con el detalle individual.
-  if (/Consulta\s*·\s*Jdbc\[/i.test(text)) {
-    methods.add("SELECT");
-  }
-
-  if (/Salto\s*·\s*Jdbc\[/i.test(text)) {
-    // Hay un salto JDBC aunque el encabezado del método no esté disponible.
-    methods.add("WRITE");
-  }
-
-  return Array.from(methods);
 }
 
 function buildJdbcAccessType(row: MetricRow): string {
@@ -533,7 +519,11 @@ function renderInvokedParamCell(value: unknown) {
         const utilitytype = String(item.utilitytype ?? "").trim() || "-";
         const invokedparam = String(item.invokedparam ?? "").trim() || "-";
         const count = Number(item.count ?? 0);
-        const maxDuration = Number(item.maxDuration ?? 0);
+        const durations = [
+          { label: "max", value: formatInvokedParamMs(item.maxDuration, 2) },
+          { label: "avg", value: formatInvokedParamMs(item.avgDuration) },
+          { label: "min", value: formatInvokedParamMs(item.minDuration) },
+        ];
 
         return (
           <div
@@ -546,8 +536,13 @@ function renderInvokedParamCell(value: unknown) {
             <div className="font-mono text-xs text-muted-foreground">
               {formatNumber(count)} exec
             </div>
-            <div className="font-mono text-xs text-muted-foreground">
-              {formatMs(maxDuration)}
+            <div className="mt-1 space-y-0.5 border-t border-border/60 pt-1 font-mono text-xs">
+              {durations.map(({ label, value }) => (
+                <div key={label} className="flex items-baseline gap-2">
+                  <span className="tabular-nums">{value}</span>
+                  <span className="text-muted-foreground">[{label}]</span>
+                </div>
+              ))}
             </div>
           </div>
         );

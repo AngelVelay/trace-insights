@@ -862,8 +862,10 @@ export function buildAwsAnalysisReport(row: MetricRow): string {
   lines.push("🔵 METRICAS");
   lines.push("");
   lines.push(`❏ ${formatNumber(executions)} exec`);
-  lines.push(`❏ Tiempo traza: ${traceJumpTime || "0.00ms"}`);
-  lines.push(`❏ Tiempo promedio Atenea: ${formatMs(meanDuration)}`);
+  lines.push(`❏ Suma de tiempos de utilidades: ${traceJumpTime || "N/D"}`);
+  lines.push(`❏ Tiempo de respuesta promedio (MU/InvokeTx): ${Number.isFinite(meanDuration) && meanDuration > 0 ? formatMs(meanDuration) : "N/D"}`);
+  const traceResponseTime = extractLastTraceValue(trace, /^Tiempo de respuesta de la traza \(RHO\):\s*([^\r\n]+)/gim);
+  lines.push(`❏ Tiempo de respuesta de la traza (RHO): ${traceResponseTime || "N/D"}`);
   lines.push(`❏ ${formatNumber(totalErrors)} errores`);
   lines.push(`❏ Volumen: ${getVolumeLevel(executions)}`);
   lines.push("");

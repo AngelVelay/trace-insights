@@ -6,8 +6,11 @@ type InvokerTxMeta = {
 };
 
 type TraceSummaryData = {
+  traceUnavailable: boolean;
   totalJumps: number;
   totalLive: string;
+  averageResponseTime: string;
+  traceResponseTime: string;
   queryCount: number;
   expectedAws: string;
   jdbcReadOnly: number;
@@ -46,24 +49,25 @@ function sumNumericMatches(text: string, regex: RegExp): number {
 }
 
 function countJdbcSelectsFromTrace(trace: string): number {
+  const recordedCount = extractLastValue(trace, /^Consultas JDBC SELECT:\s*(\d+)\s*$/gim);
+  if (recordedCount) return Number(recordedCount);
+
   const groupedCount = sumNumericMatches(
     trace,
     /^\s*[│ ]*[├└]──\s+SELECT:\s*(\d+)\s*$/gim,
   );
 
-  if (groupedCount > 0) {
+  // Si existen contadores SQL, respetar el SELECT=0 aunque haya writes.
+  if (/^\s*[│ ]*[├└]──\s+(?:SELECT|INSERT|UPDATE|DELETE|MERGE):\s*\d+\s*$/gim.test(trace)) {
     return groupedCount;
   }
 
-  // Compatibilidad con trazas antiguas sin encabezado SELECT: N.
-  return countMatches(
-    trace,
-    /^\s*[│ ]*[├└]──\s+(?:Consulta|Salto)\s*·\s*Jdbc\[/gim,
-  );
+  // Trazas antiguas: solo contar si el SQL es inequívocamente SELECT.
+  return countMatches(trace, /^\s*[│ ]*[├└]──\s+(?:Consulta|Salto)\s*·\s*Jdbc\[\s*SELECT\b/gim);
 }
 
 function countJdbcWritesFromTrace(trace: string): number {
-  const methods = ["INSERT", "UPDATE", "DELETE"];
+  const methods = ["INSERT", "UPDATE", "DELETE", "MERGE"];
 
   return methods.reduce((total, method) => {
     const regex = new RegExp(
@@ -114,10 +118,12 @@ export function formatAwsTraceDuration(ms: number): string {
   return `${seconds}s ${msText}ms`;
 }
 
-function getInvokerTxMeanDuration(row: MetricRow): number {
+function getInvokerTxMeanDuration(row: MetricRow): number | null {
   const meta = safeJsonParse<InvokerTxMeta>(row.invokerTx, {});
-  const value = Number(meta.mean_span_duration ?? row.mean_utility_duration ?? 0);
-  return Number.isFinite(value) && value > 0 ? value : 0;
+  const raw = meta.mean_span_duration ?? (row.mean_utility_duration > 0 ? row.mean_utility_duration : null);
+  if (raw === null || raw === undefined) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 function getSiteTimeLabel(row: MetricRow): string {
@@ -125,7 +131,7 @@ function getSiteTimeLabel(row: MetricRow): string {
   return site.replace(/-/g, " ");
 }
 
-function getTraceTotalTime(trace: string, row: MetricRow): string {
+function getTraceTotalTime(trace: string): string {
   // La fuente de verdad para el resumen es el mismo Tiempo total calculado
   // por tracesService. Así evitamos comparar el mean_span_duration de Atenea
   // con la suma real de los spans recuperados en la traza.
@@ -138,9 +144,8 @@ function getTraceTotalTime(trace: string, row: MetricRow): string {
     return traceTotal;
   }
 
-  // Fallback para trazas antiguas que todavía no imprimen "Tiempo total".
-  const fallbackMs = getInvokerTxMeanDuration(row);
-  return fallbackMs > 0 ? formatAwsTraceDuration(fallbackMs) : "-";
+  // Nunca presentar el promedio estadístico de MU como el tiempo de un trace.
+  return "N/D (sin tiempo real RHO en la traza)";
 }
 
 function countLabel(count: number, singular: string, plural: string): string {
@@ -171,8 +176,9 @@ function countMongoEntries(trace: string): number {
 
     if (!insideMongo) continue;
 
-    // Entrada de primer nivel de MONGO: "├── LIB (12ms)" / "└── LIB (12ms)"
-    if (/^\s{4}[├└]──\s+.+\([^)]*(?:ms|s)\)\s*$/i.test(line)) {
+    // La duración puede ser N/D. Eso no debe ocultar los saltos Mongo.
+    // Entradas: "    ├── LIB (12ms)" o "    └── LIB (N/D)".
+    if (/^\s{4}[├└]──\s+.+\((?:N\/D|[^)]*(?:ms|s))\)\s*$/i.test(line)) {
       count += 1;
     }
   }
@@ -250,6 +256,8 @@ function buildUtilityCounts(trace: string): Array<{ label: string; count: number
 
 export function getAwsTraceSummaryData(row: MetricRow): TraceSummaryData {
   const trace = String(row.trace ?? "").trim();
+  // Ausencia y respuesta parcial NO equivalen a 0 SELECT/0 saltos.
+  const traceUnavailable = /^(?:Trace no disponible|Trace no recuperada|Traza RHO localizada|Sin trazas encontradas|Sin trazas verificables)/i.test(trace) || !trace || trace === "-";
 
   const totalJumpsText = extractLastValue(
     trace,
@@ -268,9 +276,17 @@ export function getAwsTraceSummaryData(row: MetricRow): TraceSummaryData {
   const jdbcReadOnly = countJdbcSelectsFromTrace(trace);
   const jdbcJumps = countJdbcWritesFromTrace(trace);
 
+  const averageMs = getInvokerTxMeanDuration(row);
+  const traceResponseTime = extractLastValue(
+    trace,
+    /^Tiempo de respuesta de la traza \(RHO\):\s*([^\r\n]+)$/gim,
+  );
   return {
+    traceUnavailable,
     totalJumps: Number(totalJumpsText || 0),
-    totalLive: getTraceTotalTime(trace, row),
+    totalLive: getTraceTotalTime(trace),
+    averageResponseTime: averageMs === null ? "N/D" : formatAwsTraceDuration(averageMs),
+    traceResponseTime: traceResponseTime || "N/D (traza sin duración de Transaction/Job)",
     queryCount: jdbcReadOnly,
     expectedAws,
     jdbcReadOnly,
@@ -286,11 +302,17 @@ export function buildAwsTraceSummary(row: MetricRow): string {
   const lines: string[] = [
     "RESUMEN TRAZAS AWS",
     separator,
-    `• Saltos a Lago Esmeralda: ${data.totalJumps}`,
+    `• Saltos a Lago Esmeralda: ${data.traceUnavailable ? "N/D" : data.totalJumps}`,
     `• Tiempo total ${getSiteTimeLabel(row)}: ${data.totalLive}`,
-    `• Consultas realizadas en AWS: ${data.queryCount}`,
+    `• Tiempo de respuesta promedio (MU/InvokeTx): ${data.averageResponseTime}`,
+    `• Tiempo de respuesta de la traza (RHO): ${data.traceResponseTime}`,
+    `• Consultas JDBC SELECT (READ ONLY): ${data.traceUnavailable ? "N/D" : data.queryCount}`,
     `• Total de Tiempo Esperado en AWS: ${data.expectedAws}`,
   ];
+
+  if (data.traceUnavailable) {
+    lines.push(`• Estado RHO: ${String(row.trace ?? "").trim() || "Sin datos de traza"}`);
+  }
 
   const hasUtilities =
     data.jdbcReadOnly > 0 ||

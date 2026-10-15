@@ -5,6 +5,7 @@ import type {
 } from "@/services/metricsService";
 import { buildAwsAnalysisReport } from "@/services/awsReportBuilder";
 import { buildAwsTraceSummary } from "@/services/awsTraceSummary";
+import { getJdbcMethodsFromTrace } from "@/services/jdbcTraceMethods";
 
 type InvokerTxMeta = {
   invokerTx?: string;
@@ -33,7 +34,9 @@ type InvokedParamItem = {
   utilitytype?: string;
   invokedparam?: string;
   count?: number;
-  maxDuration?: number;
+  maxDuration?: number | null;
+  avgDuration?: number | null;
+  minDuration?: number | null;
 };
 
 type GroupedChannelApplication = {
@@ -206,6 +209,15 @@ function formatMs(value: number): string {
   })} ms`;
 }
 
+function formatInvokedParamMs(value: number | null | undefined, minimumFractionDigits = 0): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "—";
+
+  return `${value.toLocaleString("en-US", {
+    minimumFractionDigits,
+    maximumFractionDigits: 2,
+  })} ms`;
+}
+
 function normalizeMultilineText(value: unknown): string {
   return String(value ?? "-")
     .replace(/\r\n/g, "\n")
@@ -307,14 +319,15 @@ function renderInvokedParamCell(row: MetricRow): string {
       const utilitytype = String(item.utilitytype ?? "").trim() || "-";
       const invokedparam = String(item.invokedparam ?? "").trim() || "-";
       const count = Number(item.count ?? 0);
-      const maxDuration = Number(item.maxDuration ?? 0);
 
       return [
         library,
         utilitytype,
         invokedparam,
         `${formatNumber(count)} exec`,
-        formatMs(maxDuration),
+        `${formatInvokedParamMs(item.maxDuration, 2)} [max]`,
+        `${formatInvokedParamMs(item.avgDuration)} [avg]`,
+        `${formatInvokedParamMs(item.minDuration)} [min]`,
       ].join("\n");
     })
     .join("\n\n");
@@ -368,29 +381,6 @@ function getMonitoringTableRows(rows: MetricRow[]) {
   });
 }
 
-
-function getJdbcMethodsFromTrace(trace: unknown): string[] {
-  const text = String(trace ?? "");
-  const methods = new Set<string>();
-
-  for (const method of ["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE"]) {
-    const regex = new RegExp(`\\b${method}\\s*:\\s*\\d+`, "i");
-
-    if (regex.test(text)) {
-      methods.add(method);
-    }
-  }
-
-  if (/Consulta\s*·\s*Jdbc\[/i.test(text)) {
-    methods.add("SELECT");
-  }
-
-  if (/Salto\s*·\s*Jdbc\[/i.test(text)) {
-    methods.add("WRITE");
-  }
-
-  return Array.from(methods);
-}
 
 function renderJdbcAccessTypeCell(row: MetricRow): string {
   const methods = getJdbcMethodsFromTrace(row.trace);
